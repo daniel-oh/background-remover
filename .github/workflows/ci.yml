@@ -36,12 +36,39 @@ jobs:
         run: cargo fmt --check
       - name: Lint
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Docs build without warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
       - name: Test, with the golden parity check on both fixtures
         env:
           MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
         run: |
           cargo test --release --locked
           GOLDEN=jpeg cargo test --release --locked --test golden
+
+  msrv:
+    # The oldest Rust the crate claims to build on (Cargo.toml rust-version).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
+
+  policy:
+    # Licences, advisories, duplicate crates and sources (deny.toml), spelling,
+    # and the Dockerfile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - uses: crate-ci/typos@master
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
 
   audit:
     runs-on: ubuntu-latest
@@ -52,7 +79,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   image:
-    # Proves the container builds on every change; publishing is release.yml's job.
+    # Proves the container builds on every change and scans it for known
+    # vulnerabilities; publishing is release.yml's job.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +89,15 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: false
+          load: true
+          tags: background-remover:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: background-remover:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH

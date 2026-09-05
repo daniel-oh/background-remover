@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::imageops::SIDE;
 
+/// The model session, built on first use and released when idle.
 pub struct Model {
     cfg: Config,
     session: Mutex<Option<Session>>,
@@ -49,6 +50,7 @@ pub fn verify_checksum(path: &str, expected: &str) -> Result<(), String> {
 }
 
 impl Model {
+    /// A model that has not been loaded yet.
     pub fn new(cfg: Config) -> Model {
         Model {
             cfg,
@@ -120,6 +122,7 @@ impl Model {
         Ok(data[..plane].to_vec())
     }
 
+    /// Whether the session is resident right now.
     pub fn is_loaded(&self) -> bool {
         self.session.lock().map(|g| g.is_some()).unwrap_or(false)
     }

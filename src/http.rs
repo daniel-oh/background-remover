@@ -33,10 +33,14 @@ pub const QUEUE: usize = 4;
 /// The route gives up at 80 s; stop a little before it does.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 
+/// What every handler can reach.
 #[derive(Clone)]
 pub struct AppState {
+    /// The model, shared by all requests.
     pub model: Arc<Model>,
+    /// The configuration the process started with.
     pub cfg: Arc<Config>,
+    /// The queue: permits for requests waiting on the model.
     pub queue: Arc<Semaphore>,
 }
 
@@ -48,6 +52,7 @@ pub fn accepts(content_type: Option<&str>) -> bool {
     )
 }
 
+/// The service's routes and layers, ready to serve or to drive in a test.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))

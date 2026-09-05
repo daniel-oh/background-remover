@@ -19,11 +19,16 @@ use crate::resample::resize_lanczos;
 /// The model's input side.
 pub const SIDE: u32 = 1024;
 
+/// Where a removal went wrong.
 #[derive(Debug)]
 pub enum CutoutError {
+    /// The bytes were not a picture this service decodes.
     Decode(String),
+    /// A resize could not be set up.
     Resize(String),
+    /// The model failed to load or to run.
     Model(String),
+    /// The PNG could not be written.
     Encode(String),
 }
 

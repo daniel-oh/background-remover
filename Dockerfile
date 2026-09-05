@@ -24,6 +24,6 @@ ENV MODEL_PATH=/models/isnet-general-use/isnet-general-use.onnx \
     PORT=7000 \
     MALLOC_ARENA_MAX=2
 EXPOSE 7000
-USER nonroot
+USER 65532:65532
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 --start-period=5s CMD ["/usr/local/bin/background-remover", "--health"]
 ENTRYPOINT ["/usr/local/bin/background-remover"]

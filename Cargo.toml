@@ -2,7 +2,7 @@
 name = "background-remover"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Daniel Oh"]
 description = "Background removal as a small HTTP service: an isnet matting model through ONNX Runtime, with Pillow-exact image handling."
 license = "MIT OR Apache-2.0"
@@ -37,6 +37,11 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 hex = "0.4"
 libc = "0.2"
+
+[dev-dependencies]
+# For the in-process HTTP tests: drive the router without a socket.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 # `static` (the default, and what the image builds) links pyke's prebuilt

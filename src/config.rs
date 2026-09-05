@@ -9,18 +9,27 @@ pub const MODEL_SHA256: &str = "60920e99c45464f2ba57bee2ad08c919a52bbf852739e969
 /// Largest request body accepted.
 pub const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
 
+/// Everything the service reads from its environment.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Path to the ONNX model.
     pub model_path: String,
+    /// The hash the model must have.
     pub model_sha256: String,
+    /// Seconds without a request before the model is released.
     pub idle_seconds: u64,
+    /// ONNX Runtime intra-op threads.
     pub threads: usize,
+    /// Use the fast PNG encoder.
     pub png_fast: bool,
+    /// Address to listen on.
     pub bind: String,
+    /// Port to listen on.
     pub port: u16,
 }
 
 impl Config {
+    /// Read the configuration, falling back to the documented defaults.
     pub fn from_env() -> Config {
         Config {
             model_path: env::var("MODEL_PATH")

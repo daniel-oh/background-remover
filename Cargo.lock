@@ -81,6 +81,7 @@ dependencies = [
  "axum",
  "bytes",
  "hex",
+ "http-body-util",
  "image",
  "libc",
  "mozjpeg",
@@ -88,6 +89,7 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
+ "tower",
  "tower-http",
 ]
 

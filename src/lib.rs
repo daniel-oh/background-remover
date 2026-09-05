@@ -6,6 +6,8 @@
 //! rembg's `DisSession` do, so results are reproducible against the Python
 //! reference implementation to within a level of alpha.
 
+#![warn(missing_docs)]
+
 pub mod config;
 pub mod http;
 pub mod imageops;

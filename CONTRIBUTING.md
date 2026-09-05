@@ -26,10 +26,17 @@ with Homebrew's runtime (see the README's Building section).
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test --release                    # unit tests, and the golden test when MODEL_PATH is set
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo test --release                    # unit, HTTP and golden tests (golden when MODEL_PATH is set)
 GOLDEN=jpeg cargo test --release --test golden
-cargo audit                             # if you have it installed; CI runs it
+cargo deny check                        # licences, advisories, duplicates, sources
+typos && hadolint Dockerfile            # spelling, Dockerfile
 ```
+
+CI runs all of these plus `cargo audit`, a build on the minimum Rust
+(1.88) and a Trivy scan of the container image. Install the tools once with
+`cargo install cargo-deny typos-cli` (or Homebrew) and `hadolint` from your
+package manager.
 
 ## The golden test
 

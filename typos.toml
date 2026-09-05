@@ -1,0 +1,10 @@
+[default.extend-words]
+# Names and terms that are spelled as intended.
+isnet = "isnet"
+rembg = "rembg"
+mozjpeg = "mozjpeg"
+Rodet = "Rodet"
+Gool = "Gool"
+
+[files]
+extend-exclude = ["testdata/", "Cargo.lock", "LICENSE-APACHE", "target/"]

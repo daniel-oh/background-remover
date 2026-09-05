@@ -189,4 +189,67 @@ mod tests {
         let up = resize_lanczos(&src, 30, 50, 3, 61, 99);
         assert!(up.iter().all(|&v| v == 77));
     }
+
+    /// The fixed-point port against a plain floating-point Lanczos: on a
+    /// smooth gradient the two must agree within a level everywhere. This
+    /// guards the port's arithmetic (support, normalisation, rounding) with
+    /// a reference that does not depend on Pillow being present.
+    #[test]
+    fn agrees_with_a_float_reference_within_one_level() {
+        let (w, h) = (64usize, 48usize);
+        let src: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f64, (i / w) as f64);
+                (127.0 + 100.0 * ((x / 9.0).sin() * (y / 7.0).cos())) as u8
+            })
+            .collect();
+        for &(dw, dh) in &[(31usize, 23usize), (97, 71), (64, 48)] {
+            let ours = resize_lanczos(&src, w, h, 1, dw, dh);
+            let reference = float_lanczos(&src, w, h, dw, dh);
+            let worst = ours
+                .iter()
+                .zip(&reference)
+                .map(|(&a, &b)| (a as i32 - b as i32).abs())
+                .max()
+                .unwrap();
+            assert!(worst <= 1, "{dw}x{dh}: off by {worst}");
+        }
+    }
+
+    /// Straightforward separable Lanczos in f64, Pillow's geometry.
+    fn float_lanczos(src: &[u8], w: usize, h: usize, dw: usize, dh: usize) -> Vec<u8> {
+        fn axis(in_size: usize, out_size: usize) -> Vec<Vec<(usize, f64)>> {
+            let scale = in_size as f64 / out_size as f64;
+            let fs = scale.max(1.0);
+            let support = 3.0 * fs;
+            (0..out_size)
+                .map(|o| {
+                    let center = (o as f64 + 0.5) * scale;
+                    let lo = ((center - support + 0.5) as i64).max(0) as usize;
+                    let hi = ((center + support + 0.5) as i64).min(in_size as i64) as usize;
+                    let taps: Vec<(usize, f64)> = (lo..hi)
+                        .map(|i| (i, lanczos((i as f64 - center + 0.5) / fs)))
+                        .collect();
+                    let sum: f64 = taps.iter().map(|t| t.1).sum();
+                    taps.into_iter().map(|(i, k)| (i, k / sum)).collect()
+                })
+                .collect()
+        }
+        let xs = axis(w, dw);
+        let ys = axis(h, dh);
+        let mut mid = vec![0f64; dw * h];
+        for y in 0..h {
+            for (ox, taps) in xs.iter().enumerate() {
+                mid[y * dw + ox] = taps.iter().map(|&(i, k)| src[y * w + i] as f64 * k).sum();
+            }
+        }
+        let mut out = vec![0u8; dw * dh];
+        for (oy, taps) in ys.iter().enumerate() {
+            for x in 0..dw {
+                let v: f64 = taps.iter().map(|&(i, k)| mid[i * dw + x] * k).sum();
+                out[oy * dw + x] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        out
+    }
 }

@@ -122,6 +122,19 @@ DIS / isnet family) works: point `MODEL_PATH` at it and set `MODEL_SHA256`
 to its hash. The input name is read from the model, so it need not be
 `input_image`.
 
+## Checks
+
+Every push runs, on Linux with the real model:
+
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc` with warnings as errors
+- unit tests, the HTTP contract tests (in-process, no socket) and the golden parity test on both fixtures
+- a build on the minimum supported Rust (1.88)
+- `cargo deny` (licences, advisories, duplicate crates, sources), `cargo audit`, `typos`, `hadolint`
+- a container build and a Trivy scan of it for known vulnerabilities
+
+Dependabot keeps the crates, the actions and the base images current. `main` only
+takes pull requests that pass all of it; release tags are immutable.
+
 ## Building
 
 Linux (or any machine that links pyke's prebuilt ONNX Runtime):
