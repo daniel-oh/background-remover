@@ -1,0 +1,63 @@
+background-remover
+Copyright (c) 2026 Daniel Oh
+
+Licensed under the MIT license or the Apache License, Version 2.0, at your
+option. This file lists the third-party work this project builds on.
+
+--------------------------------------------------------------------------
+
+Pillow (the Python Imaging Library fork)
+
+src/resample.rs is a port of the 8-bit Lanczos resampling code in Pillow's
+libImaging/Resample.c (coefficient precomputation, 22-bit fixed-point
+normalisation, horizontal-then-vertical passes and clipping), so that this
+service resizes exactly as Pillow does.
+
+  The Python Imaging Library (PIL) is
+      Copyright © 1997-2011 by Secret Labs AB
+      Copyright © 1995-2011 by Fredrik Lundh and contributors
+  Pillow is the friendly PIL fork. It is
+      Copyright © 2010 by Jeffrey A. Clark and contributors
+
+  Like PIL, Pillow is licensed under the open source HPND License:
+
+  By obtaining, using, and/or copying this software and/or its associated
+  documentation, you agree that you have read, understood, and will comply
+  with the following terms and conditions:
+
+  Permission to use, copy, modify and distribute this software and its
+  associated documentation for any purpose and without fee is hereby
+  granted, provided that the above copyright notice appears in all copies,
+  and that both that copyright notice and this permission notice appear in
+  supporting documentation, and that the name of Secret Labs AB or the
+  author not be used in advertising or publicity pertaining to distribution
+  of the software without specific, written prior permission.
+
+  SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+  SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+  IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR BE LIABLE FOR ANY SPECIAL,
+  INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+  LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
+  OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+  PERFORMANCE OF THIS SOFTWARE.
+
+--------------------------------------------------------------------------
+
+isnet-general-use (the model this project is verified against)
+
+The default model is the "IS-Net" from "Highly Accurate Dichotomous Image
+Segmentation" (Xuebin Qin, Hang Dai, Xiaobin Hu, Deng-Ping Fan, Ling Shao,
+Luc Van Gool; ECCV 2022), https://github.com/xuebinqin/DIS, as exported and
+redistributed by the rembg project (Daniel Gatis),
+https://github.com/danielgatis/rembg, whose DisSession pre- and
+post-processing this project reproduces. The weights are not included in
+this repository or its container image; see the README for how to obtain
+them and check their hash.
+
+--------------------------------------------------------------------------
+
+Runtime dependencies, each under its own licence as declared on crates.io:
+ONNX Runtime through the `ort` crate (MIT), libjpeg-turbo through the
+`mozjpeg` crate (IJG, BSD-style), `image` (MIT OR Apache-2.0), `axum`,
+`tokio`, `tower-http` (MIT), `sha2`, `hex`, `serde`, `bytes`, `libc`
+(MIT OR Apache-2.0).

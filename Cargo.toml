@@ -1,0 +1,55 @@
+[package]
+name = "background-remover"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Daniel Oh"]
+description = "Background removal as a small HTTP service: an isnet matting model through ONNX Runtime, with Pillow-exact image handling."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/daniel-oh/background-remover"
+homepage = "https://github.com/daniel-oh/background-remover"
+readme = "README.md"
+keywords = ["background-removal", "matting", "onnx", "image", "isnet"]
+categories = ["multimedia::images", "web-programming::http-server"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
+
+[[bin]]
+name = "background-remover"
+path = "src/main.rs"
+
+[lib]
+name = "background_remover"
+path = "src/lib.rs"
+
+[dependencies]
+# ONNX Runtime; statically linked from pyke's prebuilt binaries by default.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std"] }
+# PNG and WebP decoding, and the PNG encoder.
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+# JPEG through libjpeg-turbo's decoder (what Pillow ships), so a JPEG decodes
+# to the same bytes here as it does in Python.
+mozjpeg = { version = "0.10", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }
+tower-http = { version = "0.6", features = ["timeout"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+
+[features]
+# `static` (the default, and what the image builds) links pyke's prebuilt
+# ONNX Runtime into the binary. `dynamic` loads a libonnxruntime at run time
+# from ORT_DYLIB_PATH, for machines whose toolchain cannot link the static
+# build (an older Xcode, for one).
+default = ["static"]
+static = ["ort/download-binaries", "ort/tls-rustls", "ort/copy-dylibs"]
+dynamic = ["ort/load-dynamic"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"

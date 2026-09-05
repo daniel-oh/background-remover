@@ -1,0 +1,28 @@
+# A hardened service definition. Put the model under ./models (see the
+# README) and make sure uid 65532 can read it: chmod -R a+rX models
+services:
+  background-remover:
+    image: ghcr.io/daniel-oh/background-remover:latest
+    restart: unless-stopped
+    environment:
+      - MODEL_PATH=/models/isnet-general-use/isnet-general-use.onnx
+      - IDLE_SECONDS=300
+      - THREADS=2
+      - MALLOC_ARENA_MAX=2
+    volumes:
+      - ./models:/models:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 2
+    # Reach it from your application on the compose network as
+    # http://background-remover:7000; publish the port only if you must.
+    ports:
+      - "127.0.0.1:7000:7000"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/background-remover", "--health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

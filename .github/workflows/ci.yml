@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  MODEL_URL: https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
+  MODEL_SHA256: 60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: .model/isnet-general-use.onnx
+          key: isnet-general-use-${{ env.MODEL_SHA256 }}
+      - name: Fetch the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .model
+          curl -sSL -o .model/isnet-general-use.onnx "$MODEL_URL"
+      - name: Check the model
+        run: echo "$MODEL_SHA256  .model/isnet-general-use.onnx" | sha256sum -c -
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test, with the golden parity check on both fixtures
+        env:
+          MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+        run: |
+          cargo test --release --locked
+          GOLDEN=jpeg cargo test --release --locked --test golden
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    # Proves the container builds on every change; publishing is release.yml's job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
