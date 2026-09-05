@@ -140,7 +140,7 @@ pub fn compose_png(rgb: &RgbImage, alpha: &[u8], fast: bool) -> Result<Vec<u8>, 
     let (w, h) = (rgb.width(), rgb.height());
     let raw = rgb.as_raw();
     let mut rgba = vec![0u8; (w * h * 4) as usize];
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         px[0] = raw[i * 3];
         px[1] = raw[i * 3 + 1];
         px[2] = raw[i * 3 + 2];
