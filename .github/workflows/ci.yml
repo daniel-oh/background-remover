@@ -21,7 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Cache the model
         id: model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .model/isnet-general-use.onnx
           key: isnet-general-use-${{ env.MODEL_SHA256 }}
@@ -65,7 +65,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Cache the model
         id: model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .model/isnet-general-use.onnx
           key: isnet-general-use-${{ env.MODEL_SHA256 }}
