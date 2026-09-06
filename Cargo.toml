@@ -3,7 +3,7 @@
 # published as background-remover-server; the binary, the library, the image
 # and the repository keep the plain name.
 name = "background-remover-server"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Daniel Oh"]
@@ -38,6 +38,8 @@ tower-http = { version = "0.7", features = ["timeout", "cors"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
+# Fetches the model on first use in command-line mode; rustls, no OpenSSL.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 hex = "0.4"
 libc = "0.2"
 

@@ -51,21 +51,18 @@ class BackgroundRemover < Formula
 
   def caveats
     <<~EOS
-      The model (178 MB) is not bundled. Fetch it once:
-        mkdir -p #{var}/background-remover
-        curl -L -o #{var}/background-remover/isnet-general-use.onnx \\\\
-          https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
-      Then either run it in the foreground:
-        MODEL_PATH=#{var}/background-remover/isnet-general-use.onnx background-remover
-      or as a service on 127.0.0.1:7000, which uses that path:
-        brew services start background-remover
+      Cut out a photo:
+        background-remover photo.jpg          # writes photo-cutout.png
+      The first run fetches the model (178 MB, once) into your cache
+      directory and verifies it; `background-remover --fetch-model` does the
+      same on its own. To run the HTTP service on 127.0.0.1:7000 instead:
+        background-remover --fetch-model && brew services start background-remover
     EOS
   end
 
   service do
     run [opt_bin/"background-remover"]
-    environment_variables MODEL_PATH: var/"background-remover/isnet-general-use.onnx",
-                          BIND:       "127.0.0.1"
+    environment_variables BIND: "127.0.0.1"
     keep_alive true
     log_path var/"log/background-remover.log"
     error_log_path var/"log/background-remover.log"

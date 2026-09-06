@@ -1,4 +1,4 @@
-//! Background removal as a small HTTP service.
+//! Background removal as a small HTTP service, and as a command.
 //!
 //! Raw image bytes in, a PNG with alpha out. The matting model
 //! (`isnet-general-use`, or any model of the same shape) runs through ONNX
@@ -8,7 +8,9 @@
 
 #![warn(missing_docs)]
 
+pub mod cli;
 pub mod config;
+pub mod fetch;
 pub mod http;
 pub mod imageops;
 pub mod model;

@@ -1,7 +1,8 @@
-//! `background-remover`: the service binary.
+//! `background-remover`: the service, and the command.
 //!
-//! `background-remover --health` is the container's healthcheck (the runtime
-//! image has no shell or curl); `--version` and `--help` do what they say.
+//! With no files it serves HTTP; with files it cuts them out and exits.
+//! `--health` is the container's healthcheck (the runtime image has no shell
+//! or curl); `--fetch-model`, `--version` and `--help` do what they say.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -9,17 +10,35 @@ use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 
+use background_remover::cli::{self, Command};
 use background_remover::config::Config;
+use background_remover::fetch::default_model_path;
 use background_remover::http::{serve, AppState};
 use background_remover::model::{verify_checksum, Model};
 use background_remover::VERSION;
 
 const HELP: &str = "\
-background-remover: background removal as a small HTTP service.
+background-remover: background removal as a command and as a small HTTP service.
 
-Usage: background-remover [--health | --version | --help]
+Usage:
+  background-remover [OPTIONS] <FILE>...   cut out the subjects; - reads stdin
+  background-remover                       run the HTTP service
+  background-remover --fetch-model         download the model into the cache
+  background-remover --health | --version | --help
 
-Runs an HTTP server (default 0.0.0.0:7000) with:
+Options for files:
+  -o, --output <PATH>    where to write (one input); - for stdout
+  -d, --out-dir <DIR>    write results into DIR instead of beside each input
+                         (default name: NAME-cutout.png, or NAME-mask.png)
+  -f, --format <png|webp> output format (default png, or from the -o extension)
+      --mask             write the mask alone, an 8-bit greyscale PNG
+      --model <PATH>     the ONNX model (default: MODEL_PATH, else the cache;
+                         fetched on first use when missing)
+      --no-download      fail instead of fetching a missing model
+  -j, --threads <N>      ONNX Runtime threads (default: up to eight cores)
+  -q, --quiet            no progress lines on stderr
+
+The service (default 0.0.0.0:7000):
   GET  /health    200 ok
   GET  /version   JSON: version, model checksum, whether the model is loaded
   GET  /metrics   Prometheus text: requests, seconds, bytes, model loaded
@@ -28,10 +47,12 @@ Runs an HTTP server (default 0.0.0.0:7000) with:
                   for a lossless WebP, ?mask=1 for the mask alone
 
 Configuration, by environment variable:
-  MODEL_PATH     path to the ONNX model (default /models/isnet-general-use/isnet-general-use.onnx)
+  MODEL_PATH     path to the ONNX model (default: the cache directory; the
+                 container image sets /models/isnet-general-use/isnet-general-use.onnx)
   MODEL_SHA256   expected checksum of the model; the process exits 1 on a mismatch
+  MODEL_URL      where --fetch-model downloads from (default: the rembg release)
   IDLE_SECONDS   release the model after this long without a request (default 300)
-  THREADS        ONNX Runtime intra-op threads (default 2)
+  THREADS        ONNX Runtime intra-op threads for the service (default 2)
   PNG_FAST       1 for the fast PNG encoder (larger files, quicker)
   BIND           address to listen on (default 0.0.0.0)
   PORT           port to listen on (default 7000)
@@ -41,24 +62,44 @@ Configuration, by environment variable:
 
 fn main() {
     let cfg = Config::from_env();
-    match std::env::args().nth(1).as_deref() {
-        Some("--health") => exit(if healthy(cfg.port) { 0 } else { 1 }),
-        Some("--version" | "-V") => {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match cli::parse(&args) {
+        Ok(Command::Serve) => {}
+        Ok(Command::Cutout(job)) => exit(cli::run(&job, &cfg)),
+        Ok(Command::FetchModel) => {
+            let job = cli::Job::default();
+            let mut log = |line: String| eprintln!("{line}");
+            match cli::ensure_model(&job, &cfg, &mut log) {
+                Ok(path) => println!("{}", path.display()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    exit(1);
+                }
+            }
+            return;
+        }
+        Ok(Command::Health) => exit(if healthy(cfg.port) { 0 } else { 1 }),
+        Ok(Command::Version) => {
             println!("background-remover {VERSION}");
             return;
         }
-        Some("--help" | "-h") => {
+        Ok(Command::Help) => {
             print!("{HELP}");
             return;
         }
-        Some(other) => {
-            eprintln!("unknown option {other}\n\n{HELP}");
+        Err(e) => {
+            eprintln!("{e}\n\n{HELP}");
             exit(2);
         }
-        None => {}
     }
     if let Err(e) = verify_checksum(&cfg.model_path, &cfg.model_sha256) {
         eprintln!("{e}");
+        if std::env::var_os("MODEL_PATH").is_none() {
+            eprintln!(
+                "no MODEL_PATH is set; run `background-remover --fetch-model` once to put the model at {}",
+                default_model_path().display()
+            );
+        }
         exit(1);
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()

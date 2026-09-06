@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "background-remover-server"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -93,6 +93,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "ureq",
 ]
 
 [[package]]

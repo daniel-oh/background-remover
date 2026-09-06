@@ -1,5 +1,6 @@
-//! Configuration from the environment. Every value has a default that makes a
-//! bare `background-remover` run the way the container does.
+//! Configuration from the environment. Every value has a default; the
+//! container image sets `MODEL_PATH` to its mounted volume, and outside it
+//! the model lives in the user's cache directory (see [`crate::fetch`]).
 
 use std::env;
 
@@ -34,8 +35,11 @@ impl Config {
     /// Read the configuration, falling back to the documented defaults.
     pub fn from_env() -> Config {
         Config {
-            model_path: env::var("MODEL_PATH")
-                .unwrap_or_else(|_| "/models/isnet-general-use/isnet-general-use.onnx".into()),
+            model_path: env::var("MODEL_PATH").unwrap_or_else(|_| {
+                crate::fetch::default_model_path()
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             model_sha256: env::var("MODEL_SHA256").unwrap_or_else(|_| MODEL_SHA256.into()),
             idle_seconds: parse("IDLE_SECONDS", 300),
             threads: parse("THREADS", 2),
@@ -74,5 +78,6 @@ mod tests {
         assert_eq!(c.model_sha256, MODEL_SHA256);
         assert!(!c.png_fast);
         assert!(c.cors_origins.is_empty());
+        assert!(c.model_path.ends_with("isnet-general-use.onnx"));
     }
 }

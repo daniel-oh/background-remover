@@ -4,8 +4,8 @@
 [![Release](https://img.shields.io/github/v/release/daniel-oh/background-remover?display_name=tag)](https://github.com/daniel-oh/background-remover/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Background removal as a small HTTP service. Send a photo, get back a PNG with
-the subject on a transparent background. One Rust binary, a 76 MB image,
+Background removal as a command and as a small HTTP service. Give it a photo,
+get back a PNG with the subject on a transparent background. One Rust binary, a 76 MB image,
 about 1 MB of memory while it waits and 400 MB while it works, and output
 that matches the Python reference implementation (rembg's `DisSession` over
 the isnet-general-use model) to within one level of alpha.
@@ -24,7 +24,26 @@ same job with the same numbers, and gets out of the way when idle.
 | Cargo | `cargo install background-remover-server` (the crate name; the binary is `background-remover`) |
 | From source | any platform with a Rust toolchain that links ONNX Runtime, Intel Macs included; see Building |
 
-## Quick start
+## Command line
+
+```sh
+brew install daniel-oh/tap/background-remover      # or a release binary, or cargo install
+
+background-remover photo.jpg                        # writes photo-cutout.png beside it
+background-remover photo.jpg -o cutout.webp         # lossless WebP, from the extension
+background-remover --mask photo.jpg                 # the mask alone, photo-mask.png
+background-remover -d out/ *.jpg                    # a batch through one loaded model
+cat photo.jpg | background-remover - > cutout.png   # stdin to stdout
+```
+
+The first run fetches the model (178 MB) into the cache directory and
+verifies its checksum; `background-remover --fetch-model` does that on its
+own and prints the path. The command uses up to eight cores: on an M1 Pro
+a 1600 px photo takes 1.3 s once the model is loaded (0.2 s), and a batch
+runs at that rate. Output is the same bytes the service produces. `--help`
+lists every option.
+
+## Service quick start
 
 ```sh
 # 1. The model (178 MB, once), into a directory you will mount read-only.
@@ -69,18 +88,20 @@ stored; the picture lives in memory for the duration of the request.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MODEL_PATH` | `/models/isnet-general-use/isnet-general-use.onnx` | the ONNX model; checksummed at start |
+| `MODEL_PATH` | the cache directory (`~/Library/Caches/background-remover/isnet-general-use.onnx` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux); the image sets `/models/isnet-general-use/isnet-general-use.onnx` | the ONNX model; checksummed at start. The service never downloads it; the command does, once |
+| `MODEL_URL` | the rembg release asset | where the command fetches the model from |
 | `MODEL_SHA256` | the isnet-general-use hash | what the model must hash to; the process exits 1 otherwise |
 | `IDLE_SECONDS` | `300` | release the model after this long without a request; the next request reloads it in about 0.3 s |
-| `THREADS` | `2` | ONNX Runtime intra-op threads |
+| `THREADS` | `2` for the service; up to eight cores for the command (`-j`) | ONNX Runtime intra-op threads |
 | `PNG_FAST` | unset | `1` for the fast PNG encoder (about a quarter larger files, several times quicker) |
 | `BIND` | `0.0.0.0` | listen address |
 | `PORT` | `7000` | listen port |
 | `CORS_ORIGINS` | unset | comma-separated origins allowed to call from a browser, or `*`; unset means no CORS headers |
 | `MALLOC_ARENA_MAX` | `2` (set in the image) | keeps glibc from holding freed memory in extra arenas |
 
-`background-remover --help`, `--version` and `--health` (the container
-healthcheck; exit 0 when `/health` answers) are the only flags.
+`background-remover --help` lists the command-line options; `--version`,
+`--fetch-model` and `--health` (the container healthcheck; exit 0 when
+`/health` answers) are the other flags.
 
 ## How a picture is processed
 
@@ -142,7 +163,8 @@ Every push runs, on Linux with the real model:
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc` with warnings as errors
 - unit tests, the HTTP contract tests (in-process, no socket) and the golden parity test on both fixtures
-- a smoke test of the built binary as a process: a good JPEG, a corrupt one, WebP and mask outputs, and the process still alive afterwards (`scripts/smoke.sh`)
+- a smoke test of the built binary as a process: a good JPEG, a corrupt one, WebP and mask outputs, the process still alive afterwards, and the command-line mode on a file, on stdin and on junk (`scripts/smoke.sh`)
+- the command-line mode as a real process against the golden reference, and the model fetch against a local HTTP server, with a wrong checksum rejected
 - the same suite on a 64-bit Arm runner, and a build on the minimum supported Rust (1.88)
 - `cargo deny` (licences, advisories, duplicate crates, sources), `cargo audit`, `typos`, `hadolint`
 - a container build and a Trivy scan of it for known vulnerabilities
@@ -204,8 +226,9 @@ png = requests.post("http://127.0.0.1:7000/remove", data=open("photo.jpg", "rb")
   hard failure.
 - Requests are bounded: 12 MiB, three content types, one inference at a
   time, a queue of four, 75 s per request.
-- Nothing is written to disk; nothing is logged but method, status, byte
-  counts and milliseconds.
+- The service writes nothing to disk and logs only method, status, byte
+  counts and milliseconds. Only the command-line mode ever downloads the
+  model, and only when no `MODEL_PATH` or `--model` was given.
 - Intended to sit on a private network behind your application, which does
   the authentication and rate limiting.
 

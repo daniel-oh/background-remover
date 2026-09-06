@@ -4,6 +4,25 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-06
+
+### Added
+
+- A command-line mode: `background-remover photo.jpg` writes
+  `photo-cutout.png` beside it; `-` reads stdin and writes stdout; several
+  files run through one loaded model; `-o`, `-d`, `-f webp`, `--mask`,
+  `-j`, `-q`. Same pipeline and parity as the service. It uses up to eight
+  cores by default (1.3 s a photo on an M1 Pro), where the service keeps
+  its two-thread default.
+- The model is fetched on first use in command-line mode, checksummed, into
+  the user's cache directory (`~/Library/Caches/background-remover`,
+  `$XDG_CACHE_HOME/background-remover`, `%LOCALAPPDATA%\background-remover`);
+  `--fetch-model` does it explicitly and prints the path; `--no-download`
+  refuses. The service never downloads: it still needs the model in place
+  and exits with a hint otherwise.
+- `MODEL_PATH` now defaults to that cache path outside the container image,
+  so the Homebrew service needs no configuration after `--fetch-model`.
+
 ## [0.2.2] - 2026-09-06
 
 ### Added
@@ -67,6 +86,7 @@ uses [Semantic Versioning](https://semver.org/).
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
+[0.3.0]: https://github.com/daniel-oh/background-remover/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/daniel-oh/background-remover/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/daniel-oh/background-remover/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/daniel-oh/background-remover/compare/v0.1.0...v0.2.0

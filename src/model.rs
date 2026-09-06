@@ -23,6 +23,8 @@ pub struct Model {
     /// Seconds since `epoch` at the last request; 0 means never.
     last_used: AtomicU64,
     epoch: Instant,
+    /// Suppress the load and release lines.
+    quiet: bool,
 }
 
 /// The weights on disk must be the ones this build was checked against.
@@ -57,13 +59,22 @@ impl Model {
             session: Mutex::new(None),
             last_used: AtomicU64::new(0),
             epoch: Instant::now(),
+            quiet: false,
         }
+    }
+
+    /// Say nothing on stderr about loading and releasing (the command's `-q`).
+    pub fn quiet(mut self, quiet: bool) -> Model {
+        self.quiet = quiet;
+        self
     }
 
     fn build(&self) -> Result<Session, String> {
         let t = Instant::now();
         let session = self.build_inner().map_err(|e| e.to_string())?;
-        eprintln!("model loaded in {:.1}s", t.elapsed().as_secs_f32());
+        if !self.quiet {
+            eprintln!("model loaded in {:.1}s", t.elapsed().as_secs_f32());
+        }
         Ok(session)
     }
 
@@ -147,7 +158,9 @@ impl Model {
         unsafe {
             libc::malloc_trim(0);
         }
-        eprintln!("model released after {}s idle", self.cfg.idle_seconds);
+        if !self.quiet {
+            eprintln!("model released after {}s idle", self.cfg.idle_seconds);
+        }
         true
     }
 }
