@@ -31,7 +31,7 @@ image = { version = "0.25", default-features = false, features = ["png", "webp"]
 mozjpeg = { version = "0.10", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }
-tower-http = { version = "0.6", features = ["timeout", "cors"] }
+tower-http = { version = "0.7", features = ["timeout", "cors"] }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
