@@ -125,7 +125,7 @@ jobs:
           Compress-Archive -Path "dist/$name" -DestinationPath "$name.zip"
           (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             background-remover-*.tar.gz
