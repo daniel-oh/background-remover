@@ -54,7 +54,7 @@ class BackgroundRemover < Formula
       Cut out a photo:
         background-remover photo.jpg          # writes photo-cutout.png
       The first run fetches the model (178 MB, once) into your cache
-      directory and verifies it; `background-remover --fetch-model` does the
+      directory and verifies it; \`background-remover --fetch-model\` does the
       same on its own. To run the HTTP service on 127.0.0.1:7000 instead:
         background-remover --fetch-model && brew services start background-remover
     EOS
