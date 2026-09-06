@@ -25,7 +25,6 @@ cat <<RUBY
 class BackgroundRemover < Formula
   desc "Background removal as a small HTTP service"
   homepage "https://github.com/daniel-oh/background-remover"
-  version "$VERSION"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
