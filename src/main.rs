@@ -10,10 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use background_remover::config::Config;
-use background_remover::http::{serve, AppState, QUEUE};
+use background_remover::http::{serve, AppState};
 use background_remover::model::{verify_checksum, Model};
 use background_remover::VERSION;
-use tokio::sync::Semaphore;
 
 const HELP: &str = "\
 background-remover: background removal as a small HTTP service.
@@ -23,8 +22,10 @@ Usage: background-remover [--health | --version | --help]
 Runs an HTTP server (default 0.0.0.0:7000) with:
   GET  /health    200 ok
   GET  /version   JSON: version, model checksum, whether the model is loaded
+  GET  /metrics   Prometheus text: requests, seconds, bytes, model loaded
   POST /remove    raw image bytes (image/jpeg, image/png, image/webp) in,
-                  PNG with alpha out
+                  PNG with alpha out; ?format=webp (or Accept: image/webp)
+                  for a lossless WebP, ?mask=1 for the mask alone
 
 Configuration, by environment variable:
   MODEL_PATH     path to the ONNX model (default /models/isnet-general-use/isnet-general-use.onnx)
@@ -34,6 +35,8 @@ Configuration, by environment variable:
   PNG_FAST       1 for the fast PNG encoder (larger files, quicker)
   BIND           address to listen on (default 0.0.0.0)
   PORT           port to listen on (default 7000)
+  CORS_ORIGINS   comma-separated origins allowed to call from a browser, or *
+                 (default none: no CORS headers)
 ";
 
 fn main() {
@@ -76,8 +79,7 @@ fn main() {
         });
         let state = AppState {
             model,
-            cfg: Arc::new(cfg.clone()),
-            queue: Arc::new(Semaphore::new(QUEUE)),
+            ..AppState::new(Model::new(cfg.clone()), cfg.clone())
         };
         if let Err(e) = serve(state, &cfg.bind, cfg.port).await {
             eprintln!("server error: {e}");

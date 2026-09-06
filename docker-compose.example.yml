@@ -9,6 +9,7 @@ services:
       - IDLE_SECONDS=300
       - THREADS=2
       - MALLOC_ARENA_MAX=2
+      # - CORS_ORIGINS=https://example.com   # only if a browser calls it directly
     volumes:
       - ./models:/models:ro
     read_only: true

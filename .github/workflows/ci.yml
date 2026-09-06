@@ -47,6 +47,34 @@ jobs:
           cargo test --release --locked
           GOLDEN=jpeg cargo test --release --locked --test golden
 
+  test-arm64:
+    # The same suite on a 64-bit Arm runner: the model, the resampler and the
+    # decoders all have architecture-specific paths.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: .model/isnet-general-use.onnx
+          key: isnet-general-use-${{ env.MODEL_SHA256 }}
+      - name: Fetch the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .model
+          curl -sSL -o .model/isnet-general-use.onnx "$MODEL_URL"
+      - name: Test
+        env:
+          MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+        run: |
+          cargo test --release --locked
+          GOLDEN=jpeg cargo test --release --locked --test golden
+
   msrv:
     # The oldest Rust the crate claims to build on (Cargo.toml rust-version).
     runs-on: ubuntu-latest

@@ -2,15 +2,12 @@
 //! model needed for the refusals. The one real removal runs only when
 //! MODEL_PATH is set, as the golden test does.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use background_remover::config::{Config, MAX_BODY_BYTES};
-use background_remover::http::{router, AppState, QUEUE};
+use background_remover::http::{router, AppState};
 use background_remover::model::Model;
 use http_body_util::BodyExt;
-use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 fn app() -> axum::Router {
@@ -18,11 +15,7 @@ fn app() -> axum::Router {
         model_path: std::env::var("MODEL_PATH").unwrap_or_else(|_| "/nonexistent.onnx".into()),
         ..Config::from_env()
     };
-    router(AppState {
-        model: Arc::new(Model::new(cfg.clone())),
-        cfg: Arc::new(cfg),
-        queue: Arc::new(Semaphore::new(QUEUE)),
-    })
+    router(AppState::new(Model::new(cfg.clone()), cfg))
 }
 
 async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, Vec<u8>, Option<String>) {
@@ -96,6 +89,60 @@ async fn garbage_that_claims_to_be_a_jpeg_is_500_not_a_crash() {
         .unwrap();
     let (status, _, _) = send(app(), req).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn metrics_are_prometheus_text() {
+    let (status, body, ct) =
+        send(app(), Request::get("/metrics").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ct.as_deref().unwrap_or("").starts_with("text/plain"));
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        text.contains("background_remover_requests_total{outcome=\"ok\"} 0"),
+        "{text}"
+    );
+    assert!(text.contains("background_remover_model_loaded 0"), "{text}");
+}
+
+#[tokio::test]
+async fn a_bad_format_is_400() {
+    let req = Request::post("/remove?format=gif")
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .body(Body::from(vec![1u8, 2, 3]))
+        .unwrap();
+    let (status, _, _) = send(app(), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cors_headers_appear_only_when_configured() {
+    let res = app()
+        .oneshot(
+            Request::get("/health")
+                .header(header::ORIGIN, "https://example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(res.headers().get("access-control-allow-origin").is_none());
+    let cfg = Config {
+        cors_origins: vec!["https://example.com".into()],
+        ..Config::from_env()
+    };
+    let app = router(AppState::new(Model::new(cfg.clone()), cfg));
+    let req = Request::get("/health")
+        .header(header::ORIGIN, "https://example.com")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://example.com")
+    );
 }
 
 #[tokio::test]

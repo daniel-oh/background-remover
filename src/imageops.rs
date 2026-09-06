@@ -160,14 +160,81 @@ pub fn compose_png(rgb: &RgbImage, alpha: &[u8], fast: bool) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// The whole job: bytes of a photo in, bytes of a PNG with alpha out.
-pub fn cutout(bytes: &[u8], model: &Model, png_fast: bool) -> Result<Vec<u8>, CutoutError> {
+/// What to hand back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Output {
+    /// The picture with the background transparent, as a PNG.
+    Png,
+    /// The same as a lossless WebP: usually a third the size of the PNG.
+    Webp,
+    /// Only the mask, as an 8-bit greyscale PNG, for pipelines that composite themselves.
+    MaskPng,
+}
+
+impl Output {
+    /// The response's content type.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Output::Png | Output::MaskPng => "image/png",
+            Output::Webp => "image/webp",
+        }
+    }
+}
+
+/// The original RGB with the mask as alpha, as a lossless WebP.
+pub fn compose_webp(rgb: &RgbImage, alpha: &[u8]) -> Result<Vec<u8>, CutoutError> {
+    let (w, h) = (rgb.width(), rgb.height());
+    let raw = rgb.as_raw();
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        px[0] = raw[i * 3];
+        px[1] = raw[i * 3 + 1];
+        px[2] = raw[i * 3 + 2];
+        px[3] = alpha[i];
+    }
+    let mut out = Vec::with_capacity((w * h) as usize);
+    image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+        .write_image(&rgba, w, h, ExtendedColorType::Rgba8)
+        .map_err(|e| CutoutError::Encode(e.to_string()))?;
+    Ok(out)
+}
+
+/// The mask alone, as an 8-bit greyscale PNG at the picture's size.
+pub fn mask_png(alpha: &[u8], w: u32, h: u32, fast: bool) -> Result<Vec<u8>, CutoutError> {
+    let mut out = Vec::with_capacity(alpha.len() / 4);
+    let compression = if fast {
+        CompressionType::Fast
+    } else {
+        CompressionType::Default
+    };
+    PngEncoder::new_with_quality(&mut out, compression, FilterType::Adaptive)
+        .write_image(alpha, w, h, ExtendedColorType::L8)
+        .map_err(|e| CutoutError::Encode(e.to_string()))?;
+    Ok(out)
+}
+
+/// The whole job: bytes of a photo in, the chosen output out.
+pub fn cutout_as(
+    bytes: &[u8],
+    model: &Model,
+    png_fast: bool,
+    output: Output,
+) -> Result<Vec<u8>, CutoutError> {
     let rgb = decode(bytes)?;
     let small = to_model_size(&rgb)?;
     let plane = model.infer(tensor_of(&small)).map_err(CutoutError::Model)?;
     let mask = mask_of(&plane);
     let alpha = mask_to_size(&mask, rgb.width(), rgb.height())?;
-    compose_png(&rgb, &alpha, png_fast)
+    match output {
+        Output::Png => compose_png(&rgb, &alpha, png_fast),
+        Output::Webp => compose_webp(&rgb, &alpha),
+        Output::MaskPng => mask_png(&alpha, rgb.width(), rgb.height(), png_fast),
+    }
+}
+
+/// Bytes of a photo in, a PNG with alpha out.
+pub fn cutout(bytes: &[u8], model: &Model, png_fast: bool) -> Result<Vec<u8>, CutoutError> {
+    cutout_as(bytes, model, png_fast, Output::Png)
 }
 
 #[cfg(test)]
@@ -224,6 +291,25 @@ mod tests {
             assert_eq!(px[3], alpha[i]);
             assert_eq!(px[0], i as u8 * 40);
         }
+    }
+
+    #[test]
+    fn webp_and_mask_round_trip() {
+        let mut img = RgbImage::new(4, 2);
+        for (i, px) in img.pixels_mut().enumerate() {
+            *px = image::Rgb([i as u8 * 30, 200, 10]);
+        }
+        let alpha = [0u8, 40, 80, 120, 160, 200, 240, 255];
+        let webp = compose_webp(&img, &alpha).unwrap();
+        let back = image::load_from_memory(&webp).unwrap().to_rgba8();
+        assert_eq!(back.dimensions(), (4, 2));
+        for (i, px) in back.pixels().enumerate() {
+            assert_eq!(px[3], alpha[i]);
+            assert_eq!(px[1], 200);
+        }
+        let mask = mask_png(&alpha, 4, 2, false).unwrap();
+        let back = image::load_from_memory(&mask).unwrap().to_luma8();
+        assert_eq!(back.as_raw(), &alpha);
     }
 
     #[test]

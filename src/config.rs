@@ -26,6 +26,8 @@ pub struct Config {
     pub bind: String,
     /// Port to listen on.
     pub port: u16,
+    /// Origins allowed to call from a browser; empty means no CORS headers.
+    pub cors_origins: Vec<String>,
 }
 
 impl Config {
@@ -40,6 +42,14 @@ impl Config {
             png_fast: env::var("PNG_FAST").map(|v| v == "1").unwrap_or(false),
             bind: env::var("BIND").unwrap_or_else(|_| "0.0.0.0".into()),
             port: parse("PORT", 7000),
+            cors_origins: env::var("CORS_ORIGINS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -63,5 +73,6 @@ mod tests {
         assert_eq!(c.idle_seconds, 300);
         assert_eq!(c.model_sha256, MODEL_SHA256);
         assert!(!c.png_fast);
+        assert!(c.cors_origins.is_empty());
     }
 }

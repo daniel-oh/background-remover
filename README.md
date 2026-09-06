@@ -14,6 +14,14 @@ It exists because the usual way to run this model is a 4 GB Python image
 that holds half a gigabyte whether or not anyone is using it. This does the
 same job with the same numbers, and gets out of the way when idle.
 
+## Where it runs
+
+| | |
+|---|---|
+| Container image | `ghcr.io/daniel-oh/background-remover`, one tag for `linux/amd64` and `linux/arm64` (Raspberry Pi 5, Graviton, Apple silicon under Docker) |
+| Binaries, on each release | Linux x86_64, Linux aarch64, macOS Apple silicon, Windows x86_64, each with a sha256 |
+| From source | any platform with a Rust toolchain that links ONNX Runtime; see Building |
+
 ## Quick start
 
 ```sh
@@ -41,10 +49,13 @@ service definition.
 |---|---|
 | `GET /health` | `200 ok` |
 | `GET /version` | `200` JSON: `version`, `model_sha256` (first 16 hex), `loaded` |
+| `GET /metrics` | `200` Prometheus text: requests by outcome, seconds, bytes in and out, model loaded |
 | `POST /remove`, body: raw image bytes, `content-type: image/jpeg`, `image/png` or `image/webp` | `200`, `content-type: image/png`, RGBA at the picture's size |
+| `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, usually a third of the PNG's size |
+| `POST /remove?mask=1` | `200`, `image/png`, the mask alone as 8-bit greyscale, for pipelines that composite themselves |
 | any other content type | `415` |
 | body over 12 MiB | `413` |
-| empty body | `400` |
+| empty body, or an unknown `format` | `400` |
 | more than four requests waiting | `503` |
 | a request running past 75 s | `408` |
 | the picture cannot be decoded, or the model fails | `500` |
@@ -63,6 +74,7 @@ stored; the picture lives in memory for the duration of the request.
 | `PNG_FAST` | unset | `1` for the fast PNG encoder (about a quarter larger files, several times quicker) |
 | `BIND` | `0.0.0.0` | listen address |
 | `PORT` | `7000` | listen port |
+| `CORS_ORIGINS` | unset | comma-separated origins allowed to call from a browser, or `*`; unset means no CORS headers |
 | `MALLOC_ARENA_MAX` | `2` (set in the image) | keeps glibc from holding freed memory in extra arenas |
 
 `background-remover --help`, `--version` and `--health` (the container
@@ -158,6 +170,27 @@ GOLDEN=jpeg MODEL_PATH=... cargo test --release --no-default-features --features
 The container image builds on `rust:1.98-trixie` and runs on
 `gcr.io/distroless/cc-debian13:nonroot` (the static ONNX Runtime needs
 glibc 2.38 and GCC 13's libstdc++). `docker build -t background-remover .`
+
+## Using it from code
+
+```sh
+# a lossless WebP instead of a PNG
+curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' 'http://127.0.0.1:7000/remove?format=webp' > cutout.webp
+# just the mask
+curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' 'http://127.0.0.1:7000/remove?mask=1' > mask.png
+```
+
+```js
+// Node or a browser (with CORS_ORIGINS set for the browser)
+const res = await fetch("http://127.0.0.1:7000/remove", { method: "POST", headers: { "content-type": "image/jpeg" }, body: bytes });
+const png = new Uint8Array(await res.arrayBuffer());
+```
+
+```python
+import requests
+png = requests.post("http://127.0.0.1:7000/remove", data=open("photo.jpg", "rb").read(),
+                    headers={"content-type": "image/jpeg"}).content
+```
 
 ## Security model
 
