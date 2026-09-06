@@ -1,6 +1,6 @@
 [package]
 name = "background-remover"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Daniel Oh"]
@@ -57,4 +57,6 @@ lto = "fat"
 codegen-units = 1
 opt-level = 3
 strip = true
-panic = "abort"
+# No `panic = "abort"`: mozjpeg signals decode errors by unwinding, which the
+# decoder catches. Aborting would turn every corrupt JPEG into a dead process
+# (scripts/smoke.sh proves the built binary survives one).

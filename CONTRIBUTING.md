@@ -31,6 +31,7 @@ cargo test --release                    # unit, HTTP and golden tests (golden wh
 GOLDEN=jpeg cargo test --release --test golden
 cargo deny check                        # licences, advisories, duplicates, sources
 typos && hadolint Dockerfile            # spelling, Dockerfile
+cargo build --release && scripts/smoke.sh   # the binary as a process, incl. a corrupt JPEG
 ```
 
 CI runs all of these plus `cargo audit`, a build on the minimum Rust

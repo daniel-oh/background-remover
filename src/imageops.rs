@@ -59,6 +59,14 @@ pub fn decode(bytes: &[u8]) -> Result<RgbImage, CutoutError> {
 }
 
 fn decode_jpeg(bytes: &[u8]) -> Result<RgbImage, CutoutError> {
+    // libjpeg reports errors by longjmp, which the mozjpeg crate turns into an
+    // unwind. Catch it here so a corrupt file is a 500, never a dead process;
+    // this only works because the crate is not built with panic=abort.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_jpeg_inner(bytes)))
+        .unwrap_or_else(|_| Err(CutoutError::Decode("corrupt JPEG".into())))
+}
+
+fn decode_jpeg_inner(bytes: &[u8]) -> Result<RgbImage, CutoutError> {
     let decompress =
         mozjpeg::Decompress::new_mem(bytes).map_err(|e| CutoutError::Decode(e.to_string()))?;
     let mut image = decompress
@@ -291,6 +299,27 @@ mod tests {
             assert_eq!(px[3], alpha[i]);
             assert_eq!(px[0], i as u8 * 40);
         }
+    }
+
+    /// Deterministic junk after a JPEG marker: the kind of body that made the
+    /// service abort before 0.2.1.
+    pub(crate) fn corrupt_jpeg() -> Vec<u8> {
+        let mut x: u32 = 0x1234_5678;
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        out.extend((0..5000).map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        }));
+        out
+    }
+
+    #[test]
+    fn a_corrupt_jpeg_is_an_error_not_a_crash() {
+        let err = decode(&corrupt_jpeg()).expect_err("junk must not decode");
+        assert!(matches!(err, CutoutError::Decode(_)), "{err}");
+        // Still able to decode afterwards: libjpeg's error path left nothing behind.
+        let good = std::fs::read("testdata/sample.jpg").unwrap();
+        assert!(decode(&good).is_ok());
     }
 
     #[test]

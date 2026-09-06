@@ -91,6 +91,28 @@ async fn garbage_that_claims_to_be_a_jpeg_is_500_not_a_crash() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// The same junk scripts/smoke.sh sends the built binary: a marker, then
+/// pseudo-random bytes. Must be a 500 with the service still answering.
+#[tokio::test]
+async fn a_corrupt_jpeg_is_500_and_the_service_keeps_answering() {
+    let mut x: u32 = 0x1234_5678;
+    let mut junk = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    junk.extend((0..5000).map(|_| {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (x >> 24) as u8
+    }));
+    let app = app();
+    let req = Request::post("/remove")
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .body(Body::from(junk))
+        .unwrap();
+    let (status, _, _) = send(app.clone(), req).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, body, _) = send(app, Request::get("/health").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"ok");
+}
+
 #[tokio::test]
 async fn metrics_are_prometheus_text() {
     let (status, body, ct) =

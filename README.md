@@ -140,7 +140,8 @@ Every push runs, on Linux with the real model:
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc` with warnings as errors
 - unit tests, the HTTP contract tests (in-process, no socket) and the golden parity test on both fixtures
-- a build on the minimum supported Rust (1.88)
+- a smoke test of the built binary as a process: a good JPEG, a corrupt one, WebP and mask outputs, and the process still alive afterwards (`scripts/smoke.sh`)
+- the same suite on a 64-bit Arm runner, and a build on the minimum supported Rust (1.88)
 - `cargo deny` (licences, advisories, duplicate crates, sources), `cargo audit`, `typos`, `hadolint`
 - a container build and a Trivy scan of it for known vulnerabilities
 

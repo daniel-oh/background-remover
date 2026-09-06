@@ -46,6 +46,12 @@ jobs:
         run: |
           cargo test --release --locked
           GOLDEN=jpeg cargo test --release --locked --test golden
+      - name: Smoke-test the built binary (a corrupt JPEG must not kill it)
+        env:
+          MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+        run: |
+          cargo build --release --locked
+          scripts/smoke.sh target/release/background-remover
 
   test-arm64:
     # The same suite on a 64-bit Arm runner: the model, the resampler and the
@@ -74,6 +80,12 @@ jobs:
         run: |
           cargo test --release --locked
           GOLDEN=jpeg cargo test --release --locked --test golden
+      - name: Smoke-test the built binary (a corrupt JPEG must not kill it)
+        env:
+          MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+        run: |
+          cargo build --release --locked
+          scripts/smoke.sh target/release/background-remover
 
   msrv:
     # The oldest Rust the crate claims to build on (Cargo.toml rust-version).
