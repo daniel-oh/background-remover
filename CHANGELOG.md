@@ -20,7 +20,7 @@ uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `?format=webp` (or `Accept: image/webp`) returns a lossless WebP with
-  alpha, 20 to 30% smaller than the PNG on the test photos; `?mask=1` returns the mask alone
+  alpha, about 20% smaller than the PNG on the test photo; `?mask=1` returns the mask alone
   as an 8-bit greyscale PNG.
 - `GET /metrics`, Prometheus text: requests by outcome, seconds spent, bytes
   in and out, whether the model is loaded.

@@ -51,7 +51,7 @@ service definition.
 | `GET /version` | `200` JSON: `version`, `model_sha256` (first 16 hex), `loaded` |
 | `GET /metrics` | `200` Prometheus text: requests by outcome, seconds, bytes in and out, model loaded |
 | `POST /remove`, body: raw image bytes, `content-type: image/jpeg`, `image/png` or `image/webp` | `200`, `content-type: image/png`, RGBA at the picture's size |
-| `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, 20 to 30% smaller than the PNG on the test photos |
+| `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, about 20% smaller than the PNG on the test photo |
 | `POST /remove?mask=1` | `200`, `image/png`, the mask alone as 8-bit greyscale, for pipelines that composite themselves |
 | any other content type | `415` |
 | body over 12 MiB | `413` |
