@@ -4,6 +4,21 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-09-06
+
+### Added
+
+- A Homebrew tap (`brew install daniel-oh/tap/background-remover`) with the
+  prebuilt binaries and a `brew services` definition; `scripts/formula.sh`
+  writes the formula and the release workflow pushes it.
+- Publishing to crates.io as `background-remover-server` (the plain name was
+  taken by an unrelated crate); the binary is still `background-remover`.
+- CI packages the crate on every change so a publish cannot fail on tag day.
+
+### Changed
+
+- Cargo package name is `background-remover-server`. Nothing else is renamed.
+
 ## [0.2.1] - 2026-09-06
 
 ### Fixed
@@ -52,6 +67,7 @@ uses [Semantic Versioning](https://semver.org/).
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
+[0.2.2]: https://github.com/daniel-oh/background-remover/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/daniel-oh/background-remover/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/daniel-oh/background-remover/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/daniel-oh/background-remover/releases/tag/v0.1.0

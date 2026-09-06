@@ -14,13 +14,15 @@ It exists because the usual way to run this model is a 4 GB Python image
 that holds half a gigabyte whether or not anyone is using it. This does the
 same job with the same numbers, and gets out of the way when idle.
 
-## Where it runs
+## Install
 
 | | |
 |---|---|
 | Container image | `ghcr.io/daniel-oh/background-remover`, one tag for `linux/amd64` and `linux/arm64` (Raspberry Pi 5, Graviton, Apple silicon under Docker) |
-| Binaries, on each release | Linux x86_64, Linux aarch64, macOS Apple silicon, Windows x86_64, each with a sha256 |
-| From source | any platform with a Rust toolchain that links ONNX Runtime; see Building |
+| Homebrew (macOS Apple silicon, Linux) | `brew install daniel-oh/tap/background-remover`, then `brew services start background-remover` after the one-time model download it prints |
+| Binaries, on each release | Linux x86_64, Linux aarch64, macOS Apple silicon, Windows x86_64, each with a sha256, on the [releases page](https://github.com/daniel-oh/background-remover/releases) |
+| Cargo | `cargo install background-remover-server` (the crate name; the binary is `background-remover`) |
+| From source | any platform with a Rust toolchain that links ONNX Runtime, Intel Macs included; see Building |
 
 ## Quick start
 

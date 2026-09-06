@@ -71,3 +71,15 @@ open("reference.png", "wb").write(remove(open("sample.jpg", "rb").read(), sessio
 
 Open an issue with the template. If it is a security matter, read
 [SECURITY.md](SECURITY.md) first.
+
+## Cutting a release
+
+1. Bump `version` in `Cargo.toml`, add the section to `CHANGELOG.md`, merge.
+2. `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+3. The release workflow builds the multi-architecture image, the four
+   binaries with checksums, the GitHub release, and, when the repository has
+   the secrets, publishes the crate (`CARGO_REGISTRY_TOKEN`) and updates the
+   Homebrew formula (`TAP_TOKEN`, a fine-grained token with contents
+   read/write on `daniel-oh/homebrew-tap`). Without a secret the matching
+   job says so and passes; the formula can then be written by hand with
+   `scripts/formula.sh X.Y.Z <dir of .sha256 files>`.

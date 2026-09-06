@@ -52,6 +52,9 @@ jobs:
         run: |
           cargo build --release --locked
           scripts/smoke.sh target/release/background-remover
+      - name: The crate packages and builds as published
+        if: runner.arch == 'X64'
+        run: cargo package --locked
 
   test-arm64:
     # The same suite on a 64-bit Arm runner: the model, the resampler and the
@@ -86,6 +89,9 @@ jobs:
         run: |
           cargo build --release --locked
           scripts/smoke.sh target/release/background-remover
+      - name: The crate packages and builds as published
+        if: runner.arch == 'X64'
+        run: cargo package --locked
 
   msrv:
     # The oldest Rust the crate claims to build on (Cargo.toml rust-version).

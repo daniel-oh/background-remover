@@ -133,3 +133,59 @@ jobs:
             background-remover-*.zip
             background-remover-*.zip.sha256
           generate_release_notes: true
+
+  crate:
+    # Publishes to crates.io when the repository has a CARGO_REGISTRY_TOKEN
+    # secret (a crates.io API token with publish-new and publish-update);
+    # without one the job says so and succeeds.
+    needs: [binary, manifest]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: No token, no publish
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: echo "CARGO_REGISTRY_TOKEN is not set; skipping crates.io"
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        with:
+          toolchain: "1.98"
+      - name: Publish
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish --locked
+
+  tap:
+    # Rewrites the Homebrew formula in daniel-oh/homebrew-tap from the
+    # checksums this release produced. Needs a TAP_TOKEN secret: a
+    # fine-grained token with contents read/write on that one repository.
+    needs: [binary]
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: No token, no formula update
+        if: env.TAP_TOKEN == ''
+        run: echo "TAP_TOKEN is not set; run scripts/formula.sh by hand"
+      - uses: actions/checkout@v7
+        if: env.TAP_TOKEN != ''
+        with:
+          repository: daniel-oh/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+      - name: Fetch the checksums
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${GITHUB_REF#refs/tags/}" --pattern '*.sha256' --dir sums
+      - name: Update the formula
+        if: env.TAP_TOKEN != ''
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          scripts/formula.sh "$VERSION" sums > tap/Formula/background-remover.rb
+          cd tap
+          git config user.name "Daniel Oh"
+          git config user.email "daniel-oh@users.noreply.github.com"
+          git add Formula/background-remover.rb
+          git commit -m "background-remover $VERSION" && git push

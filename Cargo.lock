@@ -77,8 +77,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "background-remover"
-version = "0.2.1"
+name = "background-remover-server"
+version = "0.2.2"
 dependencies = [
  "axum",
  "bytes",

@@ -1,6 +1,9 @@
 [package]
-name = "background-remover"
-version = "0.2.1"
+# crates.io already has an unrelated `background_remover`, so the package is
+# published as background-remover-server; the binary, the library, the image
+# and the repository keep the plain name.
+name = "background-remover-server"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Daniel Oh"]
