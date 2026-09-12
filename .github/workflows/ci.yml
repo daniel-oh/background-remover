@@ -112,7 +112,7 @@ jobs:
         with:
           command: check
       - uses: crate-ci/typos@master
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
 
