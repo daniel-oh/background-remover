@@ -11,6 +11,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Not an action version. `dtolnay/rust-toolchain@1.88` selects the Rust
+      # release, and 1.88 is this crate's MSRV (`rust-version` in Cargo.toml).
+      # Dependabot reads it as a tag and offers 1.120, which would turn the
+      # msrv job into a second copy of the stable build.
+      - dependency-name: dtolnay/rust-toolchain
   - package-ecosystem: docker
     directory: /
     schedule:
