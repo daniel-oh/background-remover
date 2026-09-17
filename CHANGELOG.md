@@ -11,7 +11,9 @@ uses [Semantic Versioning](https://semver.org/).
 - The release workflow wrote the GitHub release from four build jobs at
   once. They raced, and 0.3.1 was first published with two of its eight
   files. Binaries are still built in parallel but one job now publishes
-  them, all eight or none, and an existing tag can be published again with
+  them, one file at a time with retries (GitHub rejects concurrent uploads
+  to a release, including the release action's own), all eight or none. An
+  existing tag can be published again with
   `gh workflow run release.yml -f tag=vX.Y.Z`.
 
 ## [0.3.1] - 2026-09-17
