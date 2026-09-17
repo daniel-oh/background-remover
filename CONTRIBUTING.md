@@ -83,3 +83,16 @@ Open an issue with the template. If it is a security matter, read
    read/write on `daniel-oh/homebrew-tap`). Without a secret the matching
    job says so and passes; the formula can then be written by hand with
    `scripts/formula.sh X.Y.Z <dir of .sha256 files>`.
+
+If the release workflow fails part way, do not re-run it and do not move the
+tag (release tags are immutable, and a re-run uses the workflow file inside
+the tag). Fix what failed on `main`, then publish the same tag again with
+the current workflow:
+
+```sh
+gh workflow run release.yml -f tag=vX.Y.Z
+```
+
+That rebuilds the four binaries from the tag and writes the GitHub release
+once, from a single job. It leaves the container images alone, and the crate
+and formula steps do nothing when they are already current.

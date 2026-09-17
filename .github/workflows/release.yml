@@ -3,10 +3,28 @@ name: Release
 # On a version tag: build the image for linux/amd64 and linux/arm64 on
 # native runners, publish one multi-architecture tag on GitHub Container
 # Registry, and attach binaries for four platforms to the GitHub release.
+#
+# The binaries are built in parallel but the release is written ONCE, by the
+# `publish` job. Each of the four build jobs used to call the release action
+# itself, all against the same release, each also regenerating its notes.
+# They raced on GitHub's API ("Error creating asset temp dir"), and with
+# fail-fast one collision cancelled the other uploads half way: v0.3.1 went
+# out with two of its eight files. 0.3.0 had simply won the race.
+#
+# Run it by hand with a tag to publish that tag again with THIS file rather
+# than the one in the tag. Release tags are immutable and a re-run always
+# uses the tagged workflow, so this is how a release whose upload failed
+# gets finished. The images are left alone in that mode.
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag to build and publish again, e.g. v0.3.1
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,9 +32,12 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # The tag being released: the pushed one, or the one named by hand.
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   image:
+    if: github.event_name == 'push'
     strategy:
       matrix:
         include:
@@ -77,7 +98,7 @@ jobs:
       - name: Publish the multi-architecture tags
         working-directory: digests
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION=$TAG
           docker buildx imagetools create \
             -t "$IMAGE:latest" -t "$IMAGE:$VERSION" -t "$IMAGE:sha-${GITHUB_SHA::7}" \
             $(printf "$IMAGE@sha256:%s " *)
@@ -85,6 +106,8 @@ jobs:
 
   binary:
     strategy:
+      # One platform's trouble must not cancel the others mid-flight.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -98,6 +121,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98"
@@ -108,8 +133,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          NAME="background-remover-$VERSION-${{ matrix.target }}"
+          NAME="background-remover-$TAG-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
           cp target/release/background-remover README.md LICENSE-MIT LICENSE-APACHE NOTICE "dist/$NAME/"
           tar -C dist -czf "$NAME.tar.gz" "$NAME"
@@ -118,32 +142,61 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF -replace 'refs/tags/', ''
-          $name = "background-remover-$version-${{ matrix.target }}"
+          $name = "background-remover-$env:TAG-${{ matrix.target }}"
           New-Item -ItemType Directory -Path "dist/$name" | Out-Null
           Copy-Item target/release/background-remover.exe, README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "$name.zip"
           (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
-      - name: Release
-        uses: softprops/action-gh-release@v3
+      - uses: actions/upload-artifact@v7
         with:
-          files: |
+          name: binary-${{ matrix.target }}
+          path: |
             background-remover-*.tar.gz
             background-remover-*.tar.gz.sha256
             background-remover-*.zip
             background-remover-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    # The only job that touches the GitHub release. All four platforms or
+    # nothing: a release with files missing is worse than a late one.
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+      - name: Eight files, or stop
+        run: |
+          ls -l dist
+          test "$(find dist -type f | wc -l)" -eq 8
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          overwrite_files: true
 
   crate:
     # Publishes to crates.io when the repository has a CARGO_REGISTRY_TOKEN
     # secret (a crates.io API token with publish-new and publish-update);
     # without one the job says so and succeeds.
-    needs: [binary, manifest]
+    needs: [publish, manifest]
+    # `manifest` is skipped when a tag is published again by hand; a skipped
+    # need would otherwise skip this job too.
+    if: ${{ !cancelled() && needs.publish.result == 'success' && (needs.manifest.result == 'success' || needs.manifest.result == 'skipped') }}
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
       - name: No token, no publish
         if: env.CARGO_REGISTRY_TOKEN == ''
         run: echo "CARGO_REGISTRY_TOKEN is not set; skipping crates.io"
@@ -153,18 +206,29 @@ jobs:
           toolchain: "1.98"
       - name: Publish
         if: env.CARGO_REGISTRY_TOKEN != ''
-        run: cargo publish --locked
+        # crates.io versions are permanent, so publishing twice is an error.
+        # Ask first, which makes running this workflow again harmless.
+        run: |
+          VERSION=${TAG#v}
+          if curl -fsS -o /dev/null -A "background-remover release workflow" \
+              "https://crates.io/api/v1/crates/background-remover-server/$VERSION"; then
+            echo "background-remover-server $VERSION is already on crates.io"
+          else
+            cargo publish --locked
+          fi
 
   tap:
     # Rewrites the Homebrew formula in daniel-oh/homebrew-tap from the
     # checksums this release produced. Needs a TAP_TOKEN secret: a
     # fine-grained token with contents read/write on that one repository.
-    needs: [binary]
+    needs: [publish]
     runs-on: ubuntu-latest
     env:
       TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
       - name: No token, no formula update
         if: env.TAP_TOKEN == ''
         run: echo "TAP_TOKEN is not set; run scripts/formula.sh by hand"
@@ -178,14 +242,15 @@ jobs:
         if: env.TAP_TOKEN != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release download "${GITHUB_REF#refs/tags/}" --pattern '*.sha256' --dir sums
+        run: gh release download "$TAG" --pattern '*.sha256' --dir sums
       - name: Update the formula
         if: env.TAP_TOKEN != ''
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          VERSION=${TAG#v}
           scripts/formula.sh "$VERSION" sums > tap/Formula/background-remover.rb
           cd tap
           git config user.name "Daniel Oh"
           git config user.email "daniel-oh@users.noreply.github.com"
           git add Formula/background-remover.rb
-          git commit -m "background-remover $VERSION" && git push
+          # Nothing to commit when the formula is already current (a re-run).
+          git diff --cached --quiet || { git commit -m "background-remover $VERSION" && git push; }

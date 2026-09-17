@@ -4,6 +4,16 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The release workflow wrote the GitHub release from four build jobs at
+  once. They raced, and 0.3.1 was first published with two of its eight
+  files. Binaries are still built in parallel but one job now publishes
+  them, all eight or none, and an existing tag can be published again with
+  `gh workflow run release.yml -f tag=vX.Y.Z`.
+
 ## [0.3.1] - 2026-09-17
 
 ### Security
@@ -115,6 +125,7 @@ uses [Semantic Versioning](https://semver.org/).
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/daniel-oh/background-remover/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/daniel-oh/background-remover/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/daniel-oh/background-remover/compare/v0.2.1...v0.2.2
