@@ -5,11 +5,12 @@ name: Release
 # Registry, and attach binaries for four platforms to the GitHub release.
 #
 # The binaries are built in parallel but the release is written ONCE, by the
-# `publish` job. Each of the four build jobs used to call the release action
-# itself, all against the same release, each also regenerating its notes.
-# They raced on GitHub's API ("Error creating asset temp dir"), and with
-# fail-fast one collision cancelled the other uploads half way: v0.3.1 went
-# out with two of its eight files. 0.3.0 had simply won the race.
+# `publish` job, one file at a time. GitHub rejects concurrent asset uploads
+# to the same release ("Error creating asset temp dir"). Four build jobs
+# each running the release action hit that, and with fail-fast one failure
+# cancelled the other uploads half way: v0.3.1 went out with two of its
+# eight files. So did a single job using that action, which uploads in
+# parallel internally. 0.3.0 had simply been lucky.
 #
 # Run it by hand with a tag to publish that tag again with THIS file rather
 # than the one in the tag. Release tags are immutable and a re-run always
@@ -173,14 +174,36 @@ jobs:
         run: |
           ls -l dist
           test "$(find dist -type f | wc -l)" -eq 8
-      - name: Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ env.TAG }}
-          files: dist/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          overwrite_files: true
+      - name: Release, one file at a time
+        # Not softprops/action-gh-release: it uploads every file at once, and
+        # GitHub answers concurrent asset uploads to one release with "Error
+        # creating asset temp dir". Moving to a single job was necessary but
+        # not enough; the same error came back from inside the action. `gh`
+        # uploads what it is given, so give it one file per call, and retry,
+        # because the upload endpoint also fails on its own now and then.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          for file in dist/*; do
+            for attempt in 1 2 3 4; do
+              if gh release upload "$TAG" "$file" --clobber; then
+                echo "uploaded $(basename "$file")"
+                break
+              fi
+              [ "$attempt" -lt 4 ] || { echo "giving up on $file"; exit 1; }
+              sleep $((attempt * 5))
+            done
+          done
+      - name: The release has all eight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.size)\t\(.name)"'
+          test "$(gh release view "$TAG" --json assets --jq '.assets | length')" -eq 8
 
   crate:
     # Publishes to crates.io when the repository has a CARGO_REGISTRY_TOKEN
