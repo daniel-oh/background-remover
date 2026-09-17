@@ -3,7 +3,7 @@
 # published as background-remover-server; the binary, the library, the image
 # and the repository keep the plain name.
 name = "background-remover-server"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Daniel Oh"]
