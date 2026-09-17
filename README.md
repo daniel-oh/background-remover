@@ -40,7 +40,10 @@ The first run fetches the model (178 MB) into the cache directory and
 verifies its checksum; `background-remover --fetch-model` does that on its
 own and prints the path. The command uses up to eight cores: on an M1 Pro
 a 1600 px photo takes 1.3 s once the model is loaded (0.2 s), and a batch
-runs at that rate. Output is the same bytes the service produces. `--help`
+runs at that rate. Output is the same bytes the service produces at the same
+thread count (`-j 2`); ONNX Runtime sums in a different order across thread
+counts, which on the test photo moves 19 of 1.15 million alpha values by one
+level. `--help`
 lists every option.
 
 ## Service quick start

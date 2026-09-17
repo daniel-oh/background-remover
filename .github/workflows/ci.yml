@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job only reads the repository, except `audit`,
+# which asks for what it needs below.
+permissions:
+  contents: read
+
 env:
   MODEL_URL: https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
   MODEL_SHA256: 60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a
@@ -111,13 +116,21 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-      - uses: crate-ci/typos@master
-      - uses: hadolint/hadolint-action@v3.1.0
+      # A release tag, not `master`: a moving branch can change what runs here
+      # (and break the build) without any change in this repository.
+      - uses: crate-ci/typos@v1
+      - uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
 
   audit:
     runs-on: ubuntu-latest
+    # audit-check reports an advisory by creating a check run. Without this
+    # it found RUSTSEC-2026-0285 and then died on "Resource not accessible by
+    # integration", which hid the real message behind a permissions error.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
@@ -130,8 +143,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64

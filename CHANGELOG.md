@@ -4,6 +4,35 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- rustls 0.23.43 to 0.23.45 for RUSTSEC-2026-0285 (TLS 1.3 handshake
+  messages accepted across encryption-level boundaries). rustls is what the
+  command-line mode downloads the model over; the service never makes
+  outbound connections. The handshake transcript is still authenticated, so
+  the advisory does not let an attacker alter a download, and the model is
+  checksummed after fetching either way.
+
+### Changed
+
+- Every other dependency to its latest compatible release (ureq 3.4.2 and
+  ten transitive crates). `ort` stays pinned: the static ONNX Runtime
+  binaries are matched to that release.
+- CI: current majors for the Docker and artifact actions (upload and
+  download moved together; they are a pair), hadolint-action 3.5.0, and
+  `crate-ci/typos` on a release tag instead of `master`. Jobs run with a
+  read-only token; `audit` gets `checks: write` so an advisory is reported
+  instead of failing on a permissions error.
+- Dependabot no longer offers to raise `dtolnay/rust-toolchain@1.88`. That
+  ref is the minimum supported Rust version, not an action version.
+
+### Fixed
+
+- README: the command's output matches the service's byte for byte at the
+  same thread count, not at any thread count.
+
 ## [0.3.0] - 2026-09-06
 
 ### Added
@@ -86,6 +115,7 @@ uses [Semantic Versioning](https://semver.org/).
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/daniel-oh/background-remover/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/daniel-oh/background-remover/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/daniel-oh/background-remover/compare/v0.2.0...v0.2.1
