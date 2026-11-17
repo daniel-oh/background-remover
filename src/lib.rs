@@ -14,6 +14,7 @@ pub mod fetch;
 pub mod http;
 pub mod imageops;
 pub mod model;
+pub mod profile;
 pub mod refine;
 pub mod resample;
 

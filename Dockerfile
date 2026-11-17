@@ -27,7 +27,8 @@ RUN find src -name '*.rs' -exec touch {} + \
 
 FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=build /app/target/release/background-remover /usr/local/bin/background-remover
-ENV MODEL_PATH=/models/isnet-general-use/isnet-general-use.onnx \
+# MODEL picks the model; its weights are read from /models/<name>/<file>.
+ENV MODEL_DIR=/models \
     IDLE_SECONDS=300 \
     THREADS=2 \
     PORT=7000 \

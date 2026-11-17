@@ -76,3 +76,52 @@ fn matches_the_python_service() {
     );
     assert!(max_alpha <= 2, "max alpha difference {max_alpha} is over 2");
 }
+
+/// The same contract for BiRefNet at 768: testdata/sample.jpg through this
+/// program must give the mask Python gives (Pillow's resize, ONNX Runtime,
+/// numpy's sigmoid and truncation), testdata/reference-birefnet-lite-768-mask.png.
+/// Runs only when BIREFNET_768_PATH points at birefnet-lite-768.onnx.
+#[test]
+fn birefnet_matches_the_python_reference() {
+    let Ok(path) = std::env::var("BIREFNET_768_PATH") else {
+        eprintln!("golden: BIREFNET_768_PATH is not set, skipping");
+        return;
+    };
+    let known = background_remover::profile::known("birefnet-lite-768").unwrap();
+    let cfg = Config {
+        model_path: path,
+        model_path_set: true,
+        threads: 2,
+        ..Config::from_env().with_model(known)
+    };
+    background_remover::model::verify_checksum(&cfg.model_path, &cfg.model_sha256)
+        .expect("the model on disk is the published one");
+    let model = Model::new(cfg);
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/");
+    let sample = std::fs::read(format!("{dir}sample.jpg")).unwrap();
+    let reference = std::fs::read(format!("{dir}reference-birefnet-lite-768-mask.png")).unwrap();
+
+    let mut opts = background_remover::imageops::Options::default();
+    opts.output = background_remover::imageops::Output::MaskPng;
+    let started = std::time::Instant::now();
+    let mask = background_remover::imageops::cutout_with(&sample, &model, &opts)
+        .expect("cutout runs")
+        .bytes;
+    eprintln!(
+        "golden: birefnet-lite-768 took {:.2}s",
+        started.elapsed().as_secs_f32()
+    );
+    let ours = image::load_from_memory(&mask).unwrap().to_luma8();
+    let theirs = image::load_from_memory(&reference).unwrap().to_luma8();
+    assert_eq!(ours.dimensions(), theirs.dimensions());
+    let (mut max, mut sum) = (0u32, 0u64);
+    for (a, b) in ours.pixels().zip(theirs.pixels()) {
+        let d = (a[0] as i32 - b[0] as i32).unsigned_abs();
+        max = max.max(d);
+        sum += d as u64;
+    }
+    let mean = sum as f64 / (ours.width() * ours.height()) as f64;
+    eprintln!("golden: birefnet alpha max {max}, mean {mean:.4}");
+    assert!(max <= 2, "max alpha difference {max} is over 2");
+    assert!(mean < 0.1, "mean alpha difference {mean} is not under 0.1");
+}

@@ -17,6 +17,8 @@ permissions:
 env:
   MODEL_URL: https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
   MODEL_SHA256: 60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a
+  BIREFNET_768_URL: https://github.com/daniel-oh/background-remover/releases/download/models-1/birefnet-lite-768.onnx
+  BIREFNET_768_SHA256: 16eedf6a83dc37dfa021651cb856590e640050938486fbdfc96404c2ed74418c
 
 jobs:
   test:
@@ -41,6 +43,17 @@ jobs:
           curl -sSL -o .model/isnet-general-use.onnx "$MODEL_URL"
       - name: Check the model
         run: echo "$MODEL_SHA256  .model/isnet-general-use.onnx" | sha256sum -c -
+      - name: Cache BiRefNet
+        id: birefnet
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .model/birefnet-lite-768.onnx
+          key: birefnet-lite-768-${{ env.BIREFNET_768_SHA256 }}
+      - name: Fetch BiRefNet
+        if: steps.birefnet.outputs.cache-hit != 'true'
+        run: curl -sSL -o .model/birefnet-lite-768.onnx "$BIREFNET_768_URL"
+      - name: Check BiRefNet
+        run: echo "$BIREFNET_768_SHA256  .model/birefnet-lite-768.onnx" | sha256sum -c -
       - name: Format
         run: cargo fmt --check
       - name: Lint
@@ -49,9 +62,10 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --locked
-      - name: Test, with the golden parity check on both fixtures
+      - name: Test, with the golden parity checks on both fixtures and on BiRefNet
         env:
           MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+          BIREFNET_768_PATH: ${{ github.workspace }}/.model/birefnet-lite-768.onnx
         run: |
           cargo test --release --locked
           GOLDEN=jpeg cargo test --release --locked --test golden

@@ -5,7 +5,9 @@ services:
     image: ghcr.io/daniel-oh/background-remover:latest
     restart: unless-stopped
     environment:
-      - MODEL_PATH=/models/isnet-general-use/isnet-general-use.onnx
+      # Which model; its file is read from /models/<name>/<file> (README).
+      # birefnet-lite-768 is the better cutout and wants mem_limit 1600m.
+      - MODEL=isnet-general-use
       - IDLE_SECONDS=300
       - THREADS=2
       - MALLOC_ARENA_MAX=2

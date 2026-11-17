@@ -50,8 +50,10 @@ bytes. Colour must be identical; alpha may differ by at most 2 levels
 anywhere and 0.1 on average.
 
 If you change anything on the image path and the test moves, that is the
-test doing its job: explain the difference in the pull request. To
-regenerate a reference for a new fixture, run the Python side once:
+test doing its job: explain the difference in the pull request. Make
+references with Pillow 12 or earlier: Pillow 13.0 resizes some sizes
+differently from the resampler this project ports. To regenerate a
+reference for a new fixture, run the Python side once:
 
 ```python
 from rembg import new_session, remove

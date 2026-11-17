@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::fetch::{default_model_path, fetch_model, MODEL_URL};
+use crate::fetch::fetch_model;
 use crate::imageops::{cutout_with, Options, Output};
 use crate::model::{verify_checksum, Model};
 
@@ -21,8 +21,9 @@ pub enum Command {
     Serve,
     /// Cut out these inputs.
     Cutout(Job),
-    /// Download the model into the cache and print where it went.
-    FetchModel,
+    /// Download the model into the cache and print where it went: the
+    /// named one, or the configured one.
+    FetchModel(Option<String>),
     /// The container healthcheck.
     Health,
     /// Print the version.
@@ -46,6 +47,8 @@ pub struct Job {
     pub mask: bool,
     /// Model path from the command line.
     pub model: Option<PathBuf>,
+    /// A known model named on the command line, instead of a path.
+    pub model_name: Option<String>,
     /// Refuse to download a missing model.
     pub no_download: bool,
     /// ONNX Runtime threads; `None` means up to eight cores.
@@ -85,6 +88,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             words.push(a.clone());
         }
     }
+    let mut fetch = false;
     let mut it = words.iter();
     let value = |flag: &str, next: Option<&String>| -> Result<String, String> {
         next.cloned().ok_or_else(|| format!("{flag} needs a value"))
@@ -94,7 +98,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--health" => return Ok(Command::Health),
             "--version" | "-V" => return Ok(Command::Version),
             "--help" | "-h" => return Ok(Command::Help),
-            "--fetch-model" => return Ok(Command::FetchModel),
+            "--fetch-model" => fetch = true,
             "-o" | "--output" => job.output = Some(PathBuf::from(value(a, it.next())?)),
             "-d" | "--out-dir" => job.out_dir = Some(PathBuf::from(value(a, it.next())?)),
             "-f" | "--format" => {
@@ -105,7 +109,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 })
             }
             "--mask" => job.mask = true,
-            "--model" => job.model = Some(PathBuf::from(value(a, it.next())?)),
+            "--model" => {
+                // A name this program knows, or else a file.
+                let v = value(a, it.next())?;
+                if crate::profile::known(&v).is_some() {
+                    job.model_name = Some(v);
+                } else {
+                    job.model = Some(PathBuf::from(v));
+                }
+            }
             "--no-download" => job.no_download = true,
             "-j" | "--threads" => {
                 job.threads = Some(
@@ -135,6 +147,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
     }
     job.inputs.extend(files_only);
+    if fetch {
+        return Ok(Command::FetchModel(job.model_name));
+    }
     if job.inputs.is_empty() {
         if job != Job::default() {
             return Err("options given but no input files".into());
@@ -201,8 +216,7 @@ pub fn ensure_model(
 ) -> Result<PathBuf, String> {
     let path = match &job.model {
         Some(p) => p.clone(),
-        None if cfg.model_path_set => PathBuf::from(&cfg.model_path),
-        None => default_model_path(),
+        None => PathBuf::from(&cfg.model_path),
     };
     if !path.exists() {
         if job.no_download || job.model.is_some() || cfg.model_path_set {
@@ -211,9 +225,12 @@ pub fn ensure_model(
                 path.display()
             ));
         }
-        let url = std::env::var("MODEL_URL").unwrap_or_else(|_| MODEL_URL.into());
+        let url = cfg.model_url.clone();
+        let size = crate::profile::known(&cfg.model).map_or(String::new(), |k| {
+            format!("{}, {} MB, ", k.name, k.megabytes)
+        });
         log(format!(
-            "fetching the model (178 MB, once) into {}",
+            "fetching the model ({size}once) into {}",
             path.display()
         ));
         let mut shown = 0;
@@ -234,6 +251,15 @@ pub fn ensure_model(
 /// Run a job. Returns the exit code: 0 when every input succeeded, 1 when
 /// any failed (the rest still ran).
 pub fn run(job: &Job, cfg: &Config) -> i32 {
+    // `--model NAME` swaps in that model's file, checksum and profile.
+    let named;
+    let cfg = match job.model_name.as_deref().and_then(crate::profile::known) {
+        Some(known) => {
+            named = cfg.with_model(known);
+            &named
+        }
+        None => cfg,
+    };
     let mut log = |line: String| {
         if !job.quiet {
             eprintln!("{line}");
@@ -355,7 +381,14 @@ mod tests {
     fn no_arguments_means_serve() {
         assert_eq!(parse(&[]).unwrap(), Command::Serve);
         assert_eq!(parse(&args("--health")).unwrap(), Command::Health);
-        assert_eq!(parse(&args("--fetch-model")).unwrap(), Command::FetchModel);
+        assert_eq!(
+            parse(&args("--fetch-model")).unwrap(),
+            Command::FetchModel(None)
+        );
+        assert_eq!(
+            parse(&args("--model birefnet-general-lite --fetch-model")).unwrap(),
+            Command::FetchModel(Some("birefnet-general-lite".into()))
+        );
     }
 
     #[test]
@@ -369,6 +402,20 @@ mod tests {
         assert_eq!(job.format, Some(Output::Webp));
         assert_eq!(job.threads, Some(4));
         assert!(job.quiet);
+    }
+
+    #[test]
+    fn a_model_is_a_known_name_or_else_a_file() {
+        let Command::Cutout(job) = parse(&args("a.jpg --model birefnet-general")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(job.model_name.as_deref(), Some("birefnet-general"));
+        assert_eq!(job.model, None);
+        let Command::Cutout(job) = parse(&args("a.jpg --model weights/mine.onnx")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(job.model_name, None);
+        assert_eq!(job.model, Some(PathBuf::from("weights/mine.onnx")));
     }
 
     #[test]

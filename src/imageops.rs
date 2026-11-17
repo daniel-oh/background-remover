@@ -16,9 +16,11 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, RgbImage};
 
 use crate::model::Model;
+use crate::profile::Profile;
 use crate::resample::resize_lanczos;
 
-/// The model's input side.
+/// The default model's input side; other models carry theirs in their
+/// [`Profile`].
 pub const SIDE: u32 = 1024;
 
 /// Where a removal went wrong.
@@ -216,29 +218,42 @@ fn decode_jpeg_inner(
     Ok((rgb, orientation))
 }
 
-/// The RGB picture at the model's size.
+/// The RGB picture at the default model's size.
 pub fn to_model_size(rgb: &RgbImage) -> Result<RgbImage, CutoutError> {
+    to_side(rgb, SIDE)
+}
+
+/// The RGB picture resized to a `side` by `side` square.
+pub fn to_side(rgb: &RgbImage, side: u32) -> Result<RgbImage, CutoutError> {
     let data = resize_lanczos(
         rgb.as_raw(),
         rgb.width() as usize,
         rgb.height() as usize,
         3,
-        SIDE as usize,
-        SIDE as usize,
+        side as usize,
+        side as usize,
     );
-    RgbImage::from_raw(SIDE, SIDE, data)
+    RgbImage::from_raw(side, side, data)
         .ok_or_else(|| CutoutError::Resize("bad buffer size".into()))
 }
 
 /// NCHW float32 with rembg's normalisation for isnet: `/255`, mean 0.5, std 1.
 pub fn tensor_of(rgb: &RgbImage) -> Vec<f32> {
+    tensor_with(rgb, &Profile::ISNET)
+}
+
+/// NCHW float32, scaled the way the model's profile says: `/255`, minus the
+/// mean, over the standard deviation, channel by channel.
+pub fn tensor_with(rgb: &RgbImage, profile: &Profile) -> Vec<f32> {
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let raw = rgb.as_raw();
     let plane = w * h;
     let mut out = vec![0f32; 3 * plane];
-    for i in 0..plane {
-        for c in 0..3 {
-            out[c * plane + i] = raw[i * 3 + c] as f32 / 255.0 - 0.5;
+    for c in 0..3 {
+        let (mean, std) = (profile.mean[c], profile.std[c]);
+        let channel = &mut out[c * plane..(c + 1) * plane];
+        for (i, v) in channel.iter_mut().enumerate() {
+            *v = (raw[i * 3 + c] as f32 / 255.0 - mean) / std;
         }
     }
     out
@@ -247,28 +262,41 @@ pub fn tensor_of(rgb: &RgbImage) -> Vec<f32> {
 /// rembg's post: rescale the map to 0..1 by its own min and max, then uint8
 /// the way numpy's `astype("uint8")` does it, by truncation.
 pub fn mask_of(plane: &[f32]) -> Vec<u8> {
+    mask_with(plane, false)
+}
+
+/// [`mask_of`], with a sigmoid first for models whose output is logits
+/// (BiRefNet), as rembg's `BiRefNetSessionGeneral` does.
+pub fn mask_with(plane: &[f32], sigmoid: bool) -> Vec<u8> {
+    let read = |p: f32| if sigmoid { 1.0 / (1.0 + (-p).exp()) } else { p };
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
     for &p in plane {
+        let p = read(p);
         lo = lo.min(p);
         hi = hi.max(p);
     }
     let d = (hi - lo).max(1e-6);
     plane
         .iter()
-        .map(|&p| ((p - lo) / d * 255.0) as u8)
+        .map(|&p| ((read(p) - lo) / d * 255.0) as u8)
         .collect()
 }
 
-/// The mask back at the picture's size.
+/// The default model's mask back at the picture's size.
 pub fn mask_to_size(mask: &[u8], w: u32, h: u32) -> Result<Vec<u8>, CutoutError> {
-    if mask.len() != (SIDE * SIDE) as usize {
+    mask_from_side(mask, SIDE, w, h)
+}
+
+/// A `side` by `side` mask back at the picture's size.
+pub fn mask_from_side(mask: &[u8], side: u32, w: u32, h: u32) -> Result<Vec<u8>, CutoutError> {
+    if mask.len() != (side * side) as usize {
         return Err(CutoutError::Resize("mask is not the model's size".into()));
     }
     Ok(resize_lanczos(
         mask,
-        SIDE as usize,
-        SIDE as usize,
+        side as usize,
+        side as usize,
         1,
         w as usize,
         h as usize,
@@ -517,7 +545,8 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     stages.decode = ms(t);
 
     let t = std::time::Instant::now();
-    let tensor = tensor_of(&to_model_size(&rgb)?);
+    let profile = model.profile();
+    let tensor = tensor_with(&to_side(&rgb, profile.side)?, &profile);
     stages.resize = ms(t);
 
     let t = std::time::Instant::now();
@@ -525,7 +554,7 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     stages.model = ms(t);
 
     let t = std::time::Instant::now();
-    let mut alpha = mask_to_size(&mask_of(&plane), w, h)?;
+    let mut alpha = mask_from_side(&mask_with(&plane, profile.sigmoid), profile.side, w, h)?;
     stages.resize += ms(t);
 
     let colour = opts.output != Output::MaskPng;
@@ -649,6 +678,27 @@ mod tests {
         assert!((t[3] - 0.5).abs() < 1e-6);
         assert!((t[4] - (128.0 / 255.0 - 0.5)).abs() < 1e-6);
         assert!((t[5] + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_profile_scales_each_channel_its_own_way() {
+        let mut img = RgbImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgb([255, 0, 128]));
+        let t = tensor_with(&img, &Profile::BIREFNET);
+        assert!((t[0] - (1.0 - 0.485) / 0.229).abs() < 1e-5);
+        assert!((t[1] - (0.0 - 0.456) / 0.224).abs() < 1e-5);
+        assert!((t[2] - (128.0 / 255.0 - 0.406) / 0.225).abs() < 1e-5);
+        assert_eq!(tensor_with(&img, &Profile::ISNET), tensor_of(&img));
+    }
+
+    #[test]
+    fn logits_go_through_a_sigmoid_before_the_rescale() {
+        // Logits -20, 0, 20 are 0, one half and 1 to within rounding.
+        assert_eq!(mask_with(&[-20.0, 0.0, 20.0], true), vec![0, 127, 255]);
+        // Without it the same numbers are just a linear ramp.
+        assert_eq!(mask_with(&[-20.0, 10.0, 20.0], false), vec![0, 191, 255]);
+        // A sigmoid squeezes; a ramp of logits is not a ramp of alpha.
+        assert_eq!(mask_with(&[-20.0, 10.0, 20.0], true), vec![0, 254, 255]);
     }
 
     #[test]

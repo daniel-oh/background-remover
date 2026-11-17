@@ -4,7 +4,10 @@
 
 use std::env;
 
-/// The isnet-general-use weights this build was verified against.
+use crate::profile::{self, Known, Profile};
+
+/// The checksum of the default model (isnet-general-use). The other known
+/// models carry theirs in [`crate::profile::KNOWN`].
 pub const MODEL_SHA256: &str = "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a";
 
 /// Largest request body accepted.
@@ -19,6 +22,14 @@ pub const MAX_PIXELS: u64 = 25_000_000;
 /// Everything the service reads from its environment.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// The model's name, as `MODEL` gave it: one of
+    /// [`crate::profile::KNOWN`], or a name that is not known (the program
+    /// refuses to start on one).
+    pub model: String,
+    /// Where the model's weights are fetched from.
+    pub model_url: String,
+    /// How the model is fed and read.
+    pub profile: Profile,
     /// Path to the ONNX model.
     pub model_path: String,
     /// Whether `MODEL_PATH` was set, rather than the cache default used.
@@ -54,21 +65,58 @@ impl Config {
         Config::from_lookup(|name| env::var(name).ok())
     }
 
+    /// This configuration with another known model in place of its own:
+    /// that model's file in the cache directory, its checksum, its source
+    /// and its profile. What `--model NAME` does.
+    pub fn with_model(&self, known: &Known) -> Config {
+        Config {
+            model: known.name.into(),
+            model_url: known.url.into(),
+            profile: known.profile,
+            model_path: cache_path(known),
+            model_path_set: false,
+            model_sha256: known.sha256.into(),
+            ..self.clone()
+        }
+    }
+
     /// The configuration from any source of variables: the environment in
     /// the program, a fixed table in a test.
     pub fn from_lookup(var: impl Fn(&str) -> Option<String>) -> Config {
         fn parse<T: std::str::FromStr>(v: Option<String>, fallback: T) -> T {
             v.and_then(|v| v.parse().ok()).unwrap_or(fallback)
         }
+        let model = var("MODEL").unwrap_or_else(|| profile::DEFAULT.into());
+        // An unknown name keeps the default's details here; `main` reports
+        // it and stops, so nothing runs with a mixture.
+        let known = profile::known(&model)
+            .or(profile::known(profile::DEFAULT))
+            .expect("the default model is known");
         let model_path = var("MODEL_PATH");
         Config {
+            model,
+            model_url: var("MODEL_URL").unwrap_or_else(|| known.url.into()),
+            profile: {
+                let p = var("MODEL_PROFILE")
+                    .and_then(|p| Profile::named(&p))
+                    .unwrap_or(known.profile);
+                match var("MODEL_SIDE").and_then(|v| v.parse().ok()) {
+                    Some(side) if side >= 32 => p.at(side),
+                    _ => p,
+                }
+            },
             model_path_set: model_path.is_some(),
-            model_path: model_path.unwrap_or_else(|| {
-                crate::fetch::default_model_path()
+            // MODEL_DIR holds one folder per model, as the container image
+            // lays them out: /models/<name>/<file>.
+            model_path: model_path.unwrap_or_else(|| match var("MODEL_DIR") {
+                Some(dir) => std::path::Path::new(&dir)
+                    .join(known.name)
+                    .join(known.file)
                     .to_string_lossy()
-                    .into_owned()
+                    .into_owned(),
+                None => cache_path(known),
             }),
-            model_sha256: var("MODEL_SHA256").unwrap_or_else(|| MODEL_SHA256.into()),
+            model_sha256: var("MODEL_SHA256").unwrap_or_else(|| known.sha256.into()),
             idle_seconds: parse(var("IDLE_SECONDS"), 300),
             threads: parse(var("THREADS"), 2),
             png_fast: var("PNG_FAST").is_none_or(|v| v != "0"),
@@ -89,6 +137,14 @@ impl Config {
     }
 }
 
+/// Where a known model lives in the per-user cache directory.
+fn cache_path(known: &Known) -> String {
+    crate::fetch::cache_dir()
+        .join(known.file)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +154,9 @@ mod tests {
         // Not the real environment: a shell with PORT set must not fail this.
         let c = Config::from_lookup(|_| None);
         assert_eq!(c.max_pixels, None);
+        assert_eq!(c.model, "isnet-general-use");
+        assert_eq!(c.profile, Profile::ISNET);
+        assert!(c.model_url.ends_with("/isnet-general-use.onnx"));
         assert!(!c.model_path_set);
         assert_eq!(c.port, 7000);
         assert_eq!(c.threads, 2);
@@ -108,6 +167,59 @@ mod tests {
         assert_eq!(c.timeout_seconds, 75);
         assert!(c.cors_origins.is_empty());
         assert!(c.model_path.ends_with("isnet-general-use.onnx"));
+    }
+
+    #[test]
+    fn naming_a_model_brings_its_file_checksum_source_and_profile() {
+        let c = Config::from_lookup(|name| match name {
+            "MODEL" => Some("birefnet-general-lite".into()),
+            _ => None,
+        });
+        let lite = profile::known("birefnet-general-lite").unwrap();
+        assert_eq!(c.profile, Profile::BIREFNET);
+        assert_eq!(c.model_sha256, lite.sha256);
+        assert_eq!(c.model_url, lite.url);
+        assert!(c.model_path.ends_with("birefnet-general-lite.onnx"));
+        // The same from a default configuration, as --model does it.
+        let d = Config::from_lookup(|_| None).with_model(lite);
+        assert_eq!(
+            (d.model_path, d.model_sha256),
+            (c.model_path, c.model_sha256)
+        );
+        assert_eq!(d.profile, Profile::BIREFNET);
+    }
+
+    #[test]
+    fn a_models_folder_holds_one_folder_per_model() {
+        let c = Config::from_lookup(|name| match name {
+            "MODEL_DIR" => Some("/models".into()),
+            "MODEL" => Some("birefnet-lite-768".into()),
+            _ => None,
+        });
+        assert_eq!(
+            c.model_path,
+            "/models/birefnet-lite-768/birefnet-lite-768.onnx"
+        );
+        assert_eq!(c.profile.side, 768);
+        let d = Config::from_lookup(|name| (name == "MODEL_DIR").then(|| "/models".into()));
+        assert_eq!(
+            d.model_path,
+            "/models/isnet-general-use/isnet-general-use.onnx"
+        );
+    }
+
+    #[test]
+    fn a_file_of_ones_own_can_be_given_a_profile() {
+        let c = Config::from_lookup(|name| match name {
+            "MODEL_PATH" => Some("/mine.onnx".into()),
+            "MODEL_SHA256" => Some("ab".repeat(32)),
+            "MODEL_PROFILE" => Some("birefnet".into()),
+            "MODEL_SIDE" => Some("512".into()),
+            _ => None,
+        });
+        assert_eq!(c.profile, Profile::BIREFNET.at(512));
+        assert_eq!(c.model_path, "/mine.onnx");
+        assert_eq!(c.model_sha256, "ab".repeat(32));
     }
 
     #[test]

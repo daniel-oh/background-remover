@@ -37,6 +37,9 @@ background-remover --bg ffffff --crop photo.jpg     # on white, trimmed to the s
 cat photo.jpg | background-remover - > cutout.png   # stdin to stdout
 ```
 
+`--model birefnet-lite-768` (or `birefnet-general`) uses a newer model that
+cuts out people, hair and busy scenes better; see [Models](#models).
+
 The first run fetches the model (178 MB) into the cache directory and
 verifies its checksum; `background-remover --fetch-model` does that on its
 own and prints the path. The command uses up to eight cores: on an M1 Pro
@@ -107,7 +110,10 @@ picture lives in memory for the duration of the request.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MODEL_PATH` | the cache directory (`~/Library/Caches/background-remover/isnet-general-use.onnx` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux); the image sets `/models/isnet-general-use/isnet-general-use.onnx` | the ONNX model; checksummed at start. The service never downloads it; the command does, once |
+| `MODEL` | `isnet-general-use` | which model: `isnet-general-use`, `birefnet-lite-768`, `birefnet-general-lite` or `birefnet-general` (see [Models](#models)). Brings its file name, checksum, source and how it is fed and read; an unknown name stops the program |
+| `MODEL_DIR` | unset; the image sets `/models` | a folder with one folder per model, `MODEL_DIR/<name>/<file>.onnx` |
+| `MODEL_PATH` | `MODEL_DIR`, else the cache directory (`~/Library/Caches/background-remover/` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux) | the ONNX file itself; checksummed at start. The service never downloads it; the command does, once |
+| `MODEL_PROFILE`, `MODEL_SIDE` | from `MODEL` | for a file of your own: `isnet` or `birefnet` (how the picture is scaled in and the mask read out), and the square it takes |
 | `MODEL_URL` | the rembg release asset | where the command fetches the model from |
 | `MODEL_SHA256` | the isnet-general-use hash | what the model must hash to; the process exits 1 otherwise |
 | `IDLE_SECONDS` | `300` | release the model after this long without a request; the next request reloads it in about 0.3 s |
@@ -138,7 +144,9 @@ The steps are the ones rembg's `DisSession` takes, done so the bytes match:
 2. Resize to 1024×1024 with a port of Pillow's Lanczos resampler
    (`src/resample.rs`): the same 22-bit fixed-point coefficients, the same
    rounding, horizontal then vertical, an 8-bit intermediate. Bit-identical
-   to `Image.resize(..., Image.LANCZOS)`.
+   to `Image.resize(..., Image.LANCZOS)` in Pillow 11 and 12, which the
+   references were made with. Pillow 13.0 resizes some sizes differently
+   (up to 24 levels on the test photo at 1024 square, none at others).
 3. `/255`, then `(x − 0.5) / 1.0`, as NCHW float32.
 4. Run the model; take the first output's single plane.
 5. Rescale the plane to 0..1 by its own min and max, `× 255`, uint8 by
@@ -186,13 +194,49 @@ The time is the model's; the language around it does not move it. What the
 port buys is the image, the idle footprint, the start time and the absence
 of a Python package tree.
 
-## Other models
+## Models
 
-Any model with a `[1, 3, 1024, 1024]` float32 input and a single-plane
-`[1, 1, 1024, 1024]` first output that expects the same normalisation (the
-DIS / isnet family) works: point `MODEL_PATH` at it and set `MODEL_SHA256`
-to its hash. The input name is read from the model, so it need not be
-`input_image`.
+| `MODEL` | Size | Licence | |
+|---|---|---|---|
+| `isnet-general-use` (default) | 178 MB | Apache-2.0 | IS-Net (2022), as rembg ships it. Quickest and lightest |
+| `birefnet-lite-768` | 187 MB | MIT | BiRefNet_lite at 768 by 768, exported by this project ([`models-1`](https://github.com/daniel-oh/background-remover/releases/tag/models-1), `scripts/export-birefnet.py`). The best cutout that fits a small server |
+| `birefnet-general-lite` | 214 MB | MIT | The same model at 1024, the author's export |
+| `birefnet-general` | 928 MB | MIT | BiRefNet with the large backbone, the author's export. The best cutout here |
+
+Compared by eye on six hard photos (a portrait against the sea, an old
+portrait with wild hair, a bicycle in a street, a cat, a dog, a dandelion
+in grass), IS-Net made a visible mistake on three: a piece of the sleeve
+cut away, a ghost of the van parked behind the bicycle, the dandelion's
+stem lost and grass kept. The three BiRefNet models got all six right; the
+1024 ones are a little cleaner between bicycle spokes than the 768 one.
+
+Measured on an M1 Pro, two threads, a 1920 by 2397 portrait:
+
+| | Time | Peak memory |
+|---|---|---|
+| `isnet-general-use` | 2.1 s | 0.7 GB |
+| `birefnet-lite-768` | 3.5 s | 1.2 GB in the container, 1.4 GB as the command |
+| `birefnet-general-lite` | 11 s | 3.2 GB |
+| `birefnet-general` | 24 s | 3.8 GB |
+
+The BiRefNet models take ImageNet-scaled input and give logits, so the
+program scales and reads them differently (`src/profile.rs`); what comes out
+is checked against the same model run in Python
+(`testdata/reference-birefnet-lite-768-mask.png`, alpha within one level).
+
+A model of your own works if it takes a square float32 picture and gives a
+single-plane first output: set `MODEL_PATH`, `MODEL_SHA256`, `MODEL_PROFILE`
+and, if it is not 1024, `MODEL_SIDE`. The input name is read from the model.
+
+In the container image the models live in `/models/<name>/<file>.onnx`:
+
+```sh
+mkdir -p models/birefnet-lite-768
+curl -sSL -o models/birefnet-lite-768/birefnet-lite-768.onnx \
+  https://github.com/daniel-oh/background-remover/releases/download/models-1/birefnet-lite-768.onnx
+docker run --rm -p 7000:7000 -e MODEL=birefnet-lite-768 -v "$PWD/models:/models:ro" \
+  ghcr.io/daniel-oh/background-remover:latest
+```
 
 ## Checks
 

@@ -56,6 +56,21 @@ them and check their hash.
 
 --------------------------------------------------------------------------
 
+BiRefNet (birefnet-lite-768, birefnet-general-lite, birefnet-general)
+
+"Bilateral Reference for High-Resolution Dichotomous Image Segmentation"
+(Peng Zheng, Dehong Gao, Deng-Ping Fan, Li Liu, Jorma Laaksonen, Wanli
+Ouyang, Nicu Sebe; CAAI Artificial Intelligence Research, 2024),
+https://github.com/ZhengPeng7/BiRefNet, code and weights under the MIT
+licence, Copyright (c) 2024 ZhengPeng7. birefnet-general-lite and
+birefnet-general are the author's own ONNX exports. birefnet-lite-768 is
+this project's export of the author's BiRefNet_lite weights at 768 by 768
+(scripts/export-birefnet.py), published with this project's releases under
+the same MIT licence. None of the weights are in this repository or its
+container image.
+
+--------------------------------------------------------------------------
+
 Runtime dependencies, each under its own licence as declared on crates.io:
 ONNX Runtime through the `ort` crate (MIT), libjpeg-turbo through the
 `mozjpeg` crate (IJG, BSD-style), `image` (MIT OR Apache-2.0), `axum`,
