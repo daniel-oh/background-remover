@@ -53,7 +53,11 @@ http-body-util = "0.1"
 # from ORT_DYLIB_PATH, for machines whose toolchain cannot link the static
 # build (an older Xcode, for one).
 default = ["static"]
-static = ["ort/download-binaries", "ort/tls-rustls", "ort/copy-dylibs"]
+# Not `ort/copy-dylibs`: the runtime is linked in, so there is nothing to put
+# beside the binary, and that step of ort-sys rc.13 assumes the build
+# directory layout Cargo had before 1.100. On Windows it panics under the
+# new one ("The system cannot find the path specified").
+static = ["ort/download-binaries", "ort/tls-rustls"]
 dynamic = ["ort/load-dynamic"]
 
 [profile.release]

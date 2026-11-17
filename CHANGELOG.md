@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows binary did not build with Rust 1.100, so v0.4.0 was tagged
+  with its images but its binaries, crate and formula waited. A build step
+  of `ort-sys` (`copy-dylibs`, which places shared libraries beside the
+  binary) assumes the build directory layout Cargo had before 1.100. The
+  runtime is linked into the binary, so the step had nothing to do, and the
+  feature is no longer enabled.
+- CI builds and tests on Windows and macOS on every pull request, with the
+  real model. Before, a release was the first time either was compiled.
+- The release workflow runs each binary once before packaging it, and takes
+  an optional `rust` when run by hand, to rebuild a tag with a Rust other
+  than the one the tag names.
+
 ## [0.4.0] - 2026-11-17
 
 Output that is right for more photos and more uses, and an API that says
