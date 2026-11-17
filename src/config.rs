@@ -196,14 +196,16 @@ mod tests {
             "MODEL" => Some("birefnet-lite-768".into()),
             _ => None,
         });
+        // Path::join writes backslashes on Windows.
+        let path = |p: &str| p.replace('\\', "/");
         assert_eq!(
-            c.model_path,
+            path(&c.model_path),
             "/models/birefnet-lite-768/birefnet-lite-768.onnx"
         );
         assert_eq!(c.profile.side, 768);
         let d = Config::from_lookup(|name| (name == "MODEL_DIR").then(|| "/models".into()));
         assert_eq!(
-            d.model_path,
+            path(&d.model_path),
             "/models/isnet-general-use/isnet-general-use.onnx"
         );
     }
