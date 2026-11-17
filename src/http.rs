@@ -8,11 +8,14 @@
 //! - `POST /remove` with raw image bytes and `content-type: image/jpeg`,
 //!   `image/png` or `image/webp` → 200 `image/png` with alpha;
 //!   `?format=webp` (or `Accept: image/webp`) for a lossless WebP,
-//!   `?mask=1` for the mask alone as an 8-bit PNG
+//!   `?mask=1` for the mask alone as an 8-bit PNG, `?bg=RRGGBB` for the
+//!   subject on a colour, `?refine=1` to clean the edges' colour, `?crop=1`
+//!   to trim to the subject, `?orient=0` to leave the picture as stored
 //! - 415 for any other content type, 413 over 12 MiB or over the pixel
-//!   limit, 400 for an empty body or an unknown format, 503 when four
-//!   requests are already in the service, 408 when the whole request runs
-//!   past 75 s, 500 when the picture cannot be decoded or the model fails.
+//!   limit, 400 for an empty body or a bad option, 422 when the bytes are
+//!   not a picture, 503 when the queue is full, 408 when the whole request
+//!   runs past its time, 500 when the model fails. Errors are JSON:
+//!   `{"error": "a_code", "message": "a sentence"}`.
 //!
 //! One picture is worked on at a time, from decode to encode, so the memory
 //! in use is one picture's however many requests are waiting.
@@ -40,15 +43,17 @@ use crate::model::Model;
 /// Removals the service holds at once, the one being worked on included,
 /// before it says "later".
 pub const QUEUE: usize = 4;
-/// Callers typically give up around 80 s; stop a little before that.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
+/// Upper bounds, in seconds, of the buckets successful removals are counted
+/// into for `/metrics`.
+pub const BUCKETS: [f64; 8] = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 30.0, 75.0];
 
-/// Counters for `/metrics`. Plain atomics: six numbers do not need a crate.
+/// Counters for `/metrics`. Plain atomics: a few numbers do not need a crate.
 #[derive(Default)]
 pub struct Metrics {
     /// Removals that returned 200.
     pub ok: AtomicU64,
-    /// Removals refused before running (415, 413, 400, 503).
+    /// Removals refused: the request's own fault, or the queue was full
+    /// (415, 413, 400, 422, 503).
     pub refused: AtomicU64,
     /// Removals that failed while running (500).
     pub failed: AtomicU64,
@@ -58,6 +63,9 @@ pub struct Metrics {
     pub bytes_in: AtomicU64,
     /// Bytes sent in successful removals.
     pub bytes_out: AtomicU64,
+    /// Successful removals by duration: one count per [`BUCKETS`] bound,
+    /// then one for everything slower.
+    pub durations: [AtomicU64; BUCKETS.len() + 1],
 }
 
 /// What every handler can reach.
@@ -86,8 +94,8 @@ impl AppState {
     pub fn with_model(model: Arc<Model>, cfg: Config) -> AppState {
         AppState {
             model,
+            queue: Arc::new(Semaphore::new(cfg.queue)),
             cfg: Arc::new(cfg),
-            queue: Arc::new(Semaphore::new(QUEUE)),
             work: Arc::new(Mutex::new(())),
             metrics: Arc::new(Metrics::default()),
         }
@@ -102,13 +110,53 @@ pub fn accepts(content_type: Option<&str>) -> bool {
     )
 }
 
-/// `?format=png|webp` and `?mask=1` on `POST /remove`.
+/// The options of `POST /remove`, from its query string.
 #[derive(Deserialize, Default)]
 pub struct RemoveQuery {
     /// `png` (default) or `webp`.
     pub format: Option<String>,
     /// `1` or `true` for the mask alone.
     pub mask: Option<String>,
+    /// `RRGGBB`: the subject on this colour, opaque.
+    pub bg: Option<String>,
+    /// `1` to clean the old background's colour out of the edges, `0` not
+    /// to; unset means only with `bg`.
+    pub refine: Option<String>,
+    /// `1` to trim the output to the subject.
+    pub crop: Option<String>,
+    /// `0` to leave the picture as stored, ignoring its orientation tag.
+    pub orient: Option<String>,
+}
+
+/// A yes-or-no option: `1`/`true`, `0`/`false`, or not given.
+fn flag(value: Option<&str>, name: &'static str) -> Result<Option<bool>, &'static str> {
+    match value {
+        None => Ok(None),
+        Some("1" | "true") => Ok(Some(true)),
+        Some("0" | "false") => Ok(Some(false)),
+        Some(_) => Err(name),
+    }
+}
+
+/// Everything a request asked for, from its query and its Accept header.
+pub fn options_for(
+    query: &RemoveQuery,
+    accept: Option<&str>,
+    cfg: &Config,
+) -> Result<Options, &'static str> {
+    let background = match query.bg.as_deref() {
+        None => None,
+        Some(text) => Some(imageops::colour_of(text).ok_or("bg must be a colour as RRGGBB")?),
+    };
+    Ok(Options {
+        output: output_for(query, accept)?,
+        png_fast: cfg.png_fast,
+        max_pixels: cfg.max_pixels.unwrap_or(MAX_PIXELS),
+        upright: flag(query.orient.as_deref(), "orient must be 0 or 1")?.unwrap_or(true),
+        refine: flag(query.refine.as_deref(), "refine must be 0 or 1")?,
+        background,
+        crop: flag(query.crop.as_deref(), "crop must be 0 or 1")?.unwrap_or(false),
+    })
 }
 
 /// Which output a request asked for, from its query and its Accept header.
@@ -143,7 +191,7 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
+            Duration::from_secs(state.cfg.timeout_seconds),
         ));
     match cors {
         Some(layer) => router.layer(layer).with_state(state),
@@ -192,7 +240,7 @@ async fn version(State(state): State<AppState>) -> Json<Version> {
 async fn metrics(State(state): State<AppState>) -> ([(HeaderName, &'static str); 1], String) {
     let m = &state.metrics;
     let load = Ordering::Relaxed;
-    let text = format!(
+    let mut text = format!(
         "# HELP background_remover_requests_total Removal requests by outcome.\n\
          # TYPE background_remover_requests_total counter\n\
          background_remover_requests_total{{outcome=\"ok\"}} {}\n\
@@ -207,7 +255,15 @@ async fn metrics(State(state): State<AppState>) -> ([(HeaderName, &'static str);
          background_remover_bytes_total{{direction=\"out\"}} {}\n\
          # HELP background_remover_model_loaded Whether the model is resident (1) or released (0).\n\
          # TYPE background_remover_model_loaded gauge\n\
-         background_remover_model_loaded {}\n",
+         background_remover_model_loaded {}\n\
+         # HELP background_remover_in_service Removals in the service now, the running one included.\n\
+         # TYPE background_remover_in_service gauge\n\
+         background_remover_in_service {}\n\
+         # HELP background_remover_queue_size Removals the service holds before answering 503.\n\
+         # TYPE background_remover_queue_size gauge\n\
+         background_remover_queue_size {}\n\
+         # HELP background_remover_request_duration_seconds Duration of successful removals.\n\
+         # TYPE background_remover_request_duration_seconds histogram\n",
         m.ok.load(load),
         m.refused.load(load),
         m.failed.load(load),
@@ -215,7 +271,23 @@ async fn metrics(State(state): State<AppState>) -> ([(HeaderName, &'static str);
         m.bytes_in.load(load),
         m.bytes_out.load(load),
         u8::from(state.model.is_loaded()),
+        state.cfg.queue - state.queue.available_permits().min(state.cfg.queue),
+        state.cfg.queue,
     );
+    // Prometheus buckets are cumulative: each holds everything at or under it.
+    let mut total = 0;
+    for (i, count) in m.durations.iter().enumerate() {
+        total += count.load(load);
+        let bound = BUCKETS.get(i).map_or("+Inf".to_string(), |b| b.to_string());
+        text.push_str(&format!(
+            "background_remover_request_duration_seconds_bucket{{le=\"{bound}\"}} {total}\n"
+        ));
+    }
+    text.push_str(&format!(
+        "background_remover_request_duration_seconds_sum {:.3}\n\
+         background_remover_request_duration_seconds_count {total}\n",
+        m.millis.load(load) as f64 / 1000.0,
+    ));
     (
         [(
             header::CONTENT_TYPE,
@@ -231,9 +303,9 @@ async fn remove(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let refuse = |status: StatusCode, why: &'static str| {
+    let refuse = |status: StatusCode, code: &'static str, why: &'static str| {
         state.metrics.refused.fetch_add(1, Ordering::Relaxed);
-        (status, why).into_response()
+        problem(status, code, why)
     };
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -241,30 +313,31 @@ async fn remove(
     if !accepts(content_type) {
         return refuse(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_type",
             "send image/jpeg, image/png or image/webp",
         );
     }
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
-    let output = match output_for(&query, accept) {
+    let opts = match options_for(&query, accept, &state.cfg) {
         Ok(o) => o,
-        Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
+        Err(why) => return refuse(StatusCode::BAD_REQUEST, "bad_option", why),
     };
+    let output = opts.output;
     if body.is_empty() {
-        return refuse(StatusCode::BAD_REQUEST, "empty body");
+        return refuse(StatusCode::BAD_REQUEST, "empty_body", "empty body");
     }
     if body.len() > MAX_BODY_BYTES {
-        return refuse(StatusCode::PAYLOAD_TOO_LARGE, "12 MiB at most");
+        return refuse(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "12 MiB at most");
     }
     let Ok(permit) = state.queue.clone().try_acquire_owned() else {
-        return refuse(StatusCode::SERVICE_UNAVAILABLE, "busy, try again shortly");
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "busy",
+            "busy, try again shortly",
+        );
     };
     let model = state.model.clone();
     let work = state.work.clone();
-    let opts = Options {
-        output,
-        png_fast: state.cfg.png_fast,
-        max_pixels: state.cfg.max_pixels.unwrap_or(MAX_PIXELS),
-    };
     let bytes_in = body.len();
     let started = Instant::now();
     // Set when this handler is dropped: the caller went away or the timeout
@@ -292,6 +365,9 @@ async fn remove(
             m.millis.fetch_add(ms(started) as u64, Ordering::Relaxed);
             m.bytes_in.fetch_add(bytes_in as u64, Ordering::Relaxed);
             m.bytes_out.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            let seconds = started.elapsed().as_secs_f64();
+            let bucket = BUCKETS.iter().position(|&b| seconds <= b);
+            m.durations[bucket.unwrap_or(BUCKETS.len())].fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "POST /remove 200 {output:?} {}x{} in={bytes_in} out={} {}ms ({})",
                 cutout.width,
@@ -306,7 +382,17 @@ async fn remove(
             eprintln!("POST /remove 413 in={bytes_in}: {e}");
             refuse(
                 StatusCode::PAYLOAD_TOO_LARGE,
+                "too_many_pixels",
                 "the picture has too many pixels",
+            )
+        }
+        // Not a picture, or a broken one: the sender's mistake, not ours.
+        Ok(Some(Err(e @ CutoutError::Decode(_)))) => {
+            eprintln!("POST /remove 422 in={bytes_in}: {e}");
+            refuse(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "undecodable",
+                "the body is not a picture this service can read",
             )
         }
         // Only reachable when nobody is listening for the answer.
@@ -314,7 +400,11 @@ async fn remove(
         Ok(Some(Err(e))) => {
             state.metrics.failed.fetch_add(1, Ordering::Relaxed);
             eprintln!("POST /remove 500 in={bytes_in} {}ms: {e}", ms(started));
-            (StatusCode::INTERNAL_SERVER_ERROR, "the removal failed").into_response()
+            problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "the removal failed",
+            )
         }
         Err(e) => {
             state.metrics.failed.fetch_add(1, Ordering::Relaxed);
@@ -322,9 +412,24 @@ async fn remove(
                 "POST /remove 500 in={bytes_in} {}ms: task: {e}",
                 ms(started)
             );
-            (StatusCode::INTERNAL_SERVER_ERROR, "the removal failed").into_response()
+            problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "the removal failed",
+            )
         }
     }
+}
+
+#[derive(Serialize)]
+struct Problem {
+    error: &'static str,
+    message: &'static str,
+}
+
+/// An error a program can switch on and a person can read.
+fn problem(status: StatusCode, error: &'static str, message: &'static str) -> Response {
+    (status, Json(Problem { error, message })).into_response()
 }
 
 /// Marks a request as abandoned when its handler is dropped.
@@ -390,6 +495,7 @@ mod tests {
         let q = |format: Option<&str>, mask: Option<&str>| RemoveQuery {
             format: format.map(String::from),
             mask: mask.map(String::from),
+            ..RemoveQuery::default()
         };
         assert_eq!(output_for(&q(None, None), None).unwrap(), Output::Png);
         assert_eq!(
@@ -413,6 +519,38 @@ mod tests {
             Output::Png
         );
         assert!(output_for(&q(Some("gif"), None), None).is_err());
+    }
+
+    #[test]
+    fn options_come_from_the_query() {
+        let cfg = Config::from_lookup(|_| None);
+        let plain = options_for(&RemoveQuery::default(), None, &cfg).unwrap();
+        assert!(plain.upright && !plain.crop);
+        assert_eq!((plain.refine, plain.background), (None, None));
+        assert_eq!(plain.max_pixels, MAX_PIXELS);
+        let q = RemoveQuery {
+            bg: Some("ff8000".into()),
+            refine: Some("0".into()),
+            crop: Some("1".into()),
+            orient: Some("false".into()),
+            ..RemoveQuery::default()
+        };
+        let o = options_for(&q, None, &cfg).unwrap();
+        assert_eq!(o.background, Some([255, 128, 0]));
+        assert_eq!(o.refine, Some(false));
+        assert!(o.crop && !o.upright);
+        for bad in [
+            RemoveQuery {
+                bg: Some("orange".into()),
+                ..RemoveQuery::default()
+            },
+            RemoveQuery {
+                crop: Some("yes".into()),
+                ..RemoveQuery::default()
+            },
+        ] {
+            assert!(options_for(&bad, None, &cfg).is_err());
+        }
     }
 
     #[test]

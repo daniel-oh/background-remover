@@ -52,12 +52,40 @@ pub struct Job {
     pub threads: Option<usize>,
     /// No progress lines on stderr.
     pub quiet: bool,
+    /// The subject on this colour instead of on nothing.
+    pub background: Option<[u8; 3]>,
+    /// Clean the edges' colour: `--refine`, `--no-refine`, or by default
+    /// only with a background.
+    pub refine: Option<bool>,
+    /// Trim the output to the subject.
+    pub crop: bool,
+    /// Leave the picture as stored, ignoring its orientation tag.
+    pub no_orient: bool,
+    /// Replace an output file that already exists.
+    pub force: bool,
 }
 
 /// Parse the arguments after the program name. Errors are usage errors.
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut job = Job::default();
-    let mut it = args.iter();
+    // `--name=value` is `--name value`; everything after `--` is a file,
+    // whatever it starts with.
+    let mut words: Vec<String> = Vec::with_capacity(args.len());
+    let mut files_only: Vec<PathBuf> = Vec::new();
+    let mut options_over = false;
+    for a in args {
+        if options_over {
+            files_only.push(PathBuf::from(a));
+        } else if a == "--" {
+            options_over = true;
+        } else if let Some((name, v)) = a.split_once('=').filter(|_| a.starts_with("--")) {
+            words.push(name.to_string());
+            words.push(v.to_string());
+        } else {
+            words.push(a.clone());
+        }
+    }
+    let mut it = words.iter();
     let value = |flag: &str, next: Option<&String>| -> Result<String, String> {
         next.cloned().ok_or_else(|| format!("{flag} needs a value"))
     };
@@ -89,11 +117,24 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 )
             }
             "-q" | "--quiet" => job.quiet = true,
+            "--bg" => {
+                let text = value(a, it.next())?;
+                job.background = Some(
+                    crate::imageops::colour_of(&text)
+                        .ok_or(format!("--bg {text}: a colour as RRGGBB, like ffffff"))?,
+                )
+            }
+            "--refine" => job.refine = Some(true),
+            "--no-refine" => job.refine = Some(false),
+            "--crop" => job.crop = true,
+            "--no-orient" => job.no_orient = true,
+            "--force" => job.force = true,
             "-" => job.inputs.push(PathBuf::from("-")),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => job.inputs.push(PathBuf::from(s)),
         }
     }
+    job.inputs.extend(files_only);
     if job.inputs.is_empty() {
         if job != Job::default() {
             return Err("options given but no input files".into());
@@ -257,11 +298,23 @@ fn one(job: &Job, model: &Model, cfg: &Config, input: &Path, out: &Path) -> Resu
     if bytes.is_empty() {
         return Err("empty input".into());
     }
+    // Checked before the work, not after it: a second of model time is a
+    // poor way to find out the answer was going to be no.
+    if out != Path::new("-") && !job.force && out.exists() {
+        return Err(format!(
+            "{} already exists; --force to replace it",
+            out.display()
+        ));
+    }
     let opts = Options {
         output: output_kind(job, Some(out)),
         png_fast: cfg.png_fast,
         // Your own files on your own machine: no limit unless MAX_PIXELS sets one.
         max_pixels: cfg.max_pixels.unwrap_or(0),
+        upright: !job.no_orient,
+        refine: job.refine,
+        background: job.background,
+        crop: job.crop,
     };
     let result = cutout_with(&bytes, model, &opts)
         .map_err(|e| e.to_string())?
@@ -327,6 +380,25 @@ mod tests {
         assert!(parse(&args("a.jpg -f gif")).is_err());
         assert!(parse(&args("a.jpg -j 0")).is_err());
         assert!(parse(&args("a.jpg -o")).is_err());
+        assert!(parse(&args("a.jpg --bg notacolour")).is_err());
+    }
+
+    #[test]
+    fn long_options_take_an_equals_and_two_dashes_end_them() {
+        let Command::Cutout(job) = parse(&args(
+            "--format=webp --bg=#fff --crop --refine --force -- -odd.jpg --mask",
+        ))
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(job.format, Some(Output::Webp));
+        assert_eq!(job.background, Some([255, 255, 255]));
+        assert!(job.crop && job.force && !job.mask);
+        assert_eq!(job.refine, Some(true));
+        assert_eq!(
+            job.inputs,
+            vec![PathBuf::from("-odd.jpg"), PathBuf::from("--mask")]
+        );
     }
 
     #[test]

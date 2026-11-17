@@ -52,7 +52,9 @@ pub fn fetch_model(
     if let Some(dir) = dest.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    let part = dest.with_extension("onnx.part");
+    // The process id in the name: two commands started together each fetch
+    // into their own file, and the first to finish and verify wins the rename.
+    let part = dest.with_extension(format!("onnx.part.{}", std::process::id()));
     let response = ureq::get(url)
         .call()
         .map_err(|e| format!("cannot fetch {url}: {e}"))?;
@@ -130,7 +132,11 @@ mod tests {
         fetch_model(&url, &dest, &sha, |d, t| last = (d, t)).unwrap();
         assert_eq!(last, (body.len() as u64, Some(body.len() as u64)));
         assert_eq!(fs::read(&dest).unwrap(), body);
-        assert!(!dest.with_extension("onnx.part").exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .map(|d| d
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".part")))
+            .unwrap_or(true));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -143,7 +149,11 @@ mod tests {
         let err = fetch_model(&url, &dest, &"0".repeat(64), |_, _| {}).unwrap_err();
         assert!(err.contains("checksum"), "{err}");
         assert!(!dest.exists());
-        assert!(!dest.with_extension("onnx.part").exists());
+        assert!(std::fs::read_dir(dest.parent().unwrap())
+            .map(|d| d
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".part")))
+            .unwrap_or(true));
         let _ = fs::remove_dir_all(dir);
     }
 
