@@ -33,6 +33,7 @@ background-remover photo.jpg                        # writes photo-cutout.png be
 background-remover photo.jpg -o cutout.webp         # lossless WebP, from the extension
 background-remover --mask photo.jpg                 # the mask alone, photo-mask.png
 background-remover -d out/ *.jpg                    # a batch through one loaded model
+background-remover --bg ffffff --crop photo.jpg     # on white, trimmed to the subject
 cat photo.jpg | background-remover - > cutout.png   # stdin to stdout
 ```
 
@@ -43,8 +44,8 @@ a 1600 px photo takes 1.3 s once the model is loaded (0.2 s), and a batch
 runs at that rate. Output is the same bytes the service produces at the same
 thread count (`-j 2`); ONNX Runtime sums in a different order across thread
 counts, which on the test photo moves 19 of 1.15 million alpha values by one
-level. `--help`
-lists every option.
+level. An output file that already exists is left alone unless `--force`
+is given. `--help` lists every option.
 
 ## Service quick start
 
@@ -77,12 +78,22 @@ service definition.
 | `POST /remove`, body: raw image bytes, `content-type: image/jpeg`, `image/png` or `image/webp` | `200`, `content-type: image/png`, RGBA at the picture's size |
 | `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, about 20% smaller than the PNG on the test photo |
 | `POST /remove?mask=1` | `200`, `image/png`, the mask alone as 8-bit greyscale, for pipelines that composite themselves |
+| `POST /remove?bg=RRGGBB` | the subject on that colour, opaque. Cleans the edges' colour first (see `refine`) unless `refine=0` |
+| `POST /remove?refine=1` | the old background's colour taken out of the soft edges, so hair and fur do not carry a halo onto a new background |
+| `POST /remove?crop=1` | the output trimmed to the subject |
+| `POST /remove?orient=0` | the picture as stored, ignoring its orientation tag (by default a phone portrait comes back upright) |
 | any other content type | `415` |
 | body over 12 MiB, or a picture over `MAX_PIXELS` (25 megapixels) | `413` |
-| empty body, or an unknown `format` | `400` |
+| empty body, or a bad option | `400` |
+| the body is not a picture, or a broken one | `422` |
 | four removals already in the service (one running, three waiting) | `503` |
 | a request running past 75 s | `408` |
-| the picture cannot be decoded, or the model fails | `500` |
+| the model fails | `500` |
+
+Errors are JSON, `{"error": "too_many_pixels", "message": "the picture has
+too many pixels"}`: a code for a program, a sentence for a person. The codes
+are `unsupported_type`, `bad_option`, `empty_body`, `too_large`,
+`too_many_pixels`, `undecodable`, `busy` and `failed`.
 
 One picture is worked on at a time, from decode to encode, so memory in use
 is one picture's however many are waiting; a small queue absorbs bursts. A
@@ -101,7 +112,9 @@ picture lives in memory for the duration of the request.
 | `MODEL_SHA256` | the isnet-general-use hash | what the model must hash to; the process exits 1 otherwise |
 | `IDLE_SECONDS` | `300` | release the model after this long without a request; the next request reloads it in about 0.3 s |
 | `THREADS` | `2` for the service; up to eight cores for the command (`-j`) | ONNX Runtime intra-op threads |
-| `PNG_FAST` | unset | `1` for the fast PNG encoder. Measured on an M1 Pro: a 1600×2000 cutout encodes in 30 ms instead of 470 ms and is 6% larger; at 24 megapixels, 0.2 s instead of 2.8 s and 11% larger |
+| `PNG_FAST` | on | `0` for the slow PNG encoder. Measured on an M1 Pro: a 1600×2000 cutout encodes in 30 ms fast and 470 ms slow, and the slow file is 6% smaller; at 24 megapixels, 0.2 s against 2.8 s for 11% |
+| `QUEUE` | `4` | removals the service holds at once, the running one included; one more gets `503` |
+| `REQUEST_TIMEOUT` | `75` | seconds before a request is answered `408` |
 | `MAX_PIXELS` | `25000000` for the service; no limit for the command | the largest picture decoded, in pixels (`0` for no limit). At the default the service stays inside the example's 768 MB |
 | `BIND` | `0.0.0.0` | listen address |
 | `PORT` | `7000` | listen port |
@@ -116,9 +129,12 @@ picture lives in memory for the duration of the request.
 
 The steps are the ones rembg's `DisSession` takes, done so the bytes match:
 
-1. Decode to RGB, alpha dropped, no orientation applied. JPEGs go through
-   libjpeg-turbo (via `mozjpeg`), the decoder Pillow ships, with its
-   defaults; PNG and WebP through the `image` crate.
+1. Decode to RGB, alpha dropped. JPEGs go through libjpeg-turbo (via
+   `mozjpeg`), the decoder Pillow ships, with its defaults; PNG and WebP
+   through the `image` crate. Then the picture is turned the way its
+   orientation tag says, as rembg's `remove` does with
+   `ImageOps.exif_transpose`: a phone stores a portrait on its side with a
+   tag, and a PNG cannot carry the tag along.
 2. Resize to 1024×1024 with a port of Pillow's Lanczos resampler
    (`src/resample.rs`): the same 22-bit fixed-point coefficients, the same
    rounding, horizontal then vertical, an 8-bit intermediate. Bit-identical
@@ -129,6 +145,18 @@ The steps are the ones rembg's `DisSession` takes, done so the bytes match:
    truncation (numpy's `astype("uint8")`).
 6. Resize the mask back to the picture's size with the same resampler, use
    it as the alpha of the original RGB, encode PNG.
+
+Up to here the output is the reference's. Three optional steps go further,
+each off unless asked for:
+
+- **`refine`** estimates the subject's own colour for partly transparent
+  pixels (`src/refine.rs`: the blur fusion of Forte and Pitié, two passes).
+  An edge pixel is a mix of subject and old background; the mask says how
+  much of each, but the stored colour is still the mix. Opaque and
+  transparent pixels are not touched. Measured on an M1 Pro: 0.2 s on a 1600×2000
+  picture, 0.8 s at 24 megapixels.
+- **`bg`** composites onto a colour and writes an opaque picture.
+- **`crop`** trims to the box around the subject (alpha of 5% and up).
 
 ### Parity, tested
 
@@ -205,7 +233,7 @@ cargo test --release --no-default-features --features dynamic
 GOLDEN=jpeg MODEL_PATH=... cargo test --release --no-default-features --features dynamic --test golden -- --nocapture
 ```
 
-The container image builds on `rust:1.99-trixie` and runs on
+The container image builds on `rust:1.100-trixie` and runs on
 `gcr.io/distroless/cc-debian13:nonroot` (the static ONNX Runtime needs
 glibc 2.38 and GCC 13's libstdc++). `docker build -t background-remover .`
 
@@ -239,7 +267,8 @@ png = requests.post("http://127.0.0.1:7000/remove", data=open("photo.jpg", "rb")
   hard failure.
 - Requests are bounded: 12 MiB, 25 megapixels (checked from the header,
   before decoding), three content types, one picture in memory at a time,
-  four in the service, 75 s per request.
+  four in the service, 75 s per request. `/metrics` has the queue's depth
+  and a histogram of durations to alert on.
 - The workflows that build and publish run actions pinned to a commit, and
   release images carry signed build provenance and an SBOM.
 - The service writes nothing to disk and logs only method, status, byte

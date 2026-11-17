@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Runs the built binary as a real process and checks it survives what unit
-# tests cannot: a corrupt JPEG must be a 500, not a dead process (tests are
+# tests cannot: a corrupt JPEG must be a 422, not a dead process (tests are
 # always built with unwinding, so only the shipped binary shows a panic
 # strategy mistake). Needs MODEL_PATH; curl and python3 on PATH.
 #
@@ -54,13 +54,15 @@ check() { # name expected-status request...
 }
 
 check "good jpeg"     200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
-check "corrupt jpeg"  500 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
-check "corrupt png"   500 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/png'  "http://127.0.0.1:$PORT/remove"
+check "corrupt jpeg"  422 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
+check "corrupt png"   422 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/png'  "http://127.0.0.1:$PORT/remove"
 check "huge picture"  413 --data-binary "@$TMP/huge.jpg"     -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "empty body"    400 -X POST                            -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "health after"  200 "http://127.0.0.1:$PORT/health"
 check "webp"          200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove?format=webp"
 check "mask"          200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove?mask=1"
+check "on white, cropped" 200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove?bg=ffffff&crop=1"
+check "bad colour"    400 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove?bg=white"
 
 # The command-line mode, as a process: a file, stdin to stdout, a corrupt file.
 is_png() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]; }
@@ -69,5 +71,7 @@ is_png "$TMP/cli.png" || { echo "smoke: cli did not write a PNG"; exit 1; }
 "$BIN" -q - < testdata/sample.jpg > "$TMP/stdout.png" || { echo "smoke: cli stdin failed"; exit 1; }
 is_png "$TMP/stdout.png" || { echo "smoke: cli stdout is not a PNG"; exit 1; }
 if "$BIN" -q -o "$TMP/junk.png" "$TMP/junk.jpg" 2>/dev/null; then echo "smoke: cli accepted junk"; exit 1; fi
+if "$BIN" -q -o "$TMP/cli.png" testdata/sample.jpg 2>/dev/null; then echo "smoke: cli replaced a file without --force"; exit 1; fi
+"$BIN" -q --force --bg ffffff --crop -o "$TMP/cli.png" testdata/sample.jpg || { echo "smoke: cli --force --bg --crop failed"; exit 1; }
 echo "smoke: cli: ok"
 echo "smoke: ok"

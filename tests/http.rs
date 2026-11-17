@@ -82,19 +82,19 @@ async fn oversized_body_is_413() {
 }
 
 #[tokio::test]
-async fn garbage_that_claims_to_be_a_jpeg_is_500_not_a_crash() {
+async fn garbage_that_claims_to_be_a_jpeg_is_422_not_a_crash() {
     let req = Request::post("/remove")
         .header(header::CONTENT_TYPE, "image/jpeg")
         .body(Body::from(vec![0xFF, 0xD8, 0x00, 0x01, 0x02]))
         .unwrap();
     let (status, _, _) = send(app(), req).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 /// The same junk scripts/smoke.sh sends the built binary: a marker, then
-/// pseudo-random bytes. Must be a 500 with the service still answering.
+/// pseudo-random bytes. Must be a 422 with the service still answering.
 #[tokio::test]
-async fn a_corrupt_jpeg_is_500_and_the_service_keeps_answering() {
+async fn a_corrupt_jpeg_is_422_and_the_service_keeps_answering() {
     let mut x: u32 = 0x1234_5678;
     let mut junk = vec![0xFF, 0xD8, 0xFF, 0xE0];
     junk.extend((0..5000).map(|_| {
@@ -107,7 +107,7 @@ async fn a_corrupt_jpeg_is_500_and_the_service_keeps_answering() {
         .body(Body::from(junk))
         .unwrap();
     let (status, _, _) = send(app.clone(), req).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, body, _) = send(app, Request::get("/health").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"ok");
@@ -337,4 +337,118 @@ async fn a_burst_fills_the_queue_and_status_stays_quick() {
         }
     }
     assert_eq!((ok, busy), (QUEUE, 6 - QUEUE));
+}
+
+#[tokio::test]
+async fn errors_are_json_with_a_code_and_a_sentence() {
+    let cases = [
+        (
+            Request::post("/remove")
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from("hello"))
+                .unwrap(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_type",
+        ),
+        (
+            Request::post("/remove?bg=orange")
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .body(Body::from(vec![1u8]))
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "bad_option",
+        ),
+        (
+            Request::post("/remove")
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(b"not a picture".to_vec()))
+                .unwrap(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "undecodable",
+        ),
+    ];
+    for (req, want, code) in cases {
+        let (status, body, ct) = send(app(), req).await;
+        assert_eq!(status, want);
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains(&format!("\"error\":\"{code}\"")), "{text}");
+        assert!(text.contains("\"message\":\""), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn metrics_carry_a_histogram_and_the_queue() {
+    let (_, body, _) = send(app(), Request::get("/metrics").body(Body::empty()).unwrap()).await;
+    let text = String::from_utf8(body).unwrap();
+    for line in [
+        "background_remover_in_service 0",
+        "background_remover_queue_size 4",
+        "background_remover_request_duration_seconds_bucket{le=\"0.5\"} 0",
+        "background_remover_request_duration_seconds_bucket{le=\"+Inf\"} 0",
+        "background_remover_request_duration_seconds_count 0",
+    ] {
+        assert!(text.contains(line), "missing {line} in\n{text}");
+    }
+}
+
+/// The options on a real removal: a colour behind the subject makes the
+/// output opaque, crop makes it smaller, and a phone portrait is upright.
+#[tokio::test]
+async fn background_crop_and_orientation_on_a_real_removal() {
+    if std::env::var("MODEL_PATH").is_err() {
+        eprintln!("http: MODEL_PATH is not set, skipping the options");
+        return;
+    }
+    let sample =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    let remove = |query: &'static str, bytes: Vec<u8>| async move {
+        let req = Request::post(format!("/remove{query}"))
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(bytes))
+            .unwrap();
+        let (status, body, _) = send(app(), req).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        image::load_from_memory(&body).unwrap()
+    };
+
+    let plain = remove("", sample.clone()).await.to_rgba8();
+    let on_green = remove("?bg=00ff00", sample.clone()).await;
+    assert_eq!(on_green.color(), image::ColorType::Rgb8, "opaque");
+    let on_green = on_green.to_rgb8();
+    assert_eq!(on_green.dimensions(), plain.dimensions());
+    // Where the cutout is fully transparent the colour is the background's;
+    // where it is fully opaque it is the photo's.
+    for (cut, flat) in plain.pixels().zip(on_green.pixels()) {
+        match cut[3] {
+            0 => assert_eq!(flat.0, [0, 255, 0]),
+            255 => assert_eq!(flat.0, [cut[0], cut[1], cut[2]]),
+            _ => {}
+        }
+    }
+
+    // Cropped: exactly the box around the subject in the plain cutout, with
+    // the same pixels in it. (In this photo the subject reaches the frame,
+    // so the box may be the whole picture; the arithmetic is what is tested.)
+    let cropped = remove("?crop=1", sample.clone()).await.to_rgba8();
+    let alpha: Vec<u8> = plain.pixels().map(|p| p[3]).collect();
+    let (x, y, w, h) =
+        background_remover::imageops::subject_box(&alpha, plain.width(), plain.height()).unwrap();
+    assert_eq!(cropped.dimensions(), (w, h));
+    assert_eq!(cropped.get_pixel(0, 0), plain.get_pixel(x, y));
+    assert_eq!(
+        cropped.get_pixel(w - 1, h - 1),
+        plain.get_pixel(x + w - 1, y + h - 1)
+    );
+
+    // The same photo saved by a phone held upright: stored on its side with
+    // a tag. It must come back the size a viewer shows it at.
+    let mut tagged = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x22];
+    tagged.extend(b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01");
+    tagged.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+    tagged.extend(&sample[2..]);
+    let upright = remove("", tagged.clone()).await;
+    assert_eq!((upright.width(), upright.height()), (1200, 960));
+    let stored = remove("?orient=0", tagged).await;
+    assert_eq!((stored.width(), stored.height()), (960, 1200));
 }

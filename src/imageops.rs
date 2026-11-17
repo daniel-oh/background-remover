@@ -1,6 +1,7 @@
 //! The image work around the model, matching rembg's `DisSession`:
 //!
-//! 1. decode, drop alpha (`convert("RGB")`)
+//! 1. decode, drop alpha (`convert("RGB")`), turn the picture the way its
+//!    orientation tag says (`ImageOps.exif_transpose`, as rembg's `remove`)
 //! 2. Lanczos to 1024 by 1024, `/255`, `(x - 0.5) / 1.0`, NCHW float32
 //! 3. run the model, take the first output's single channel
 //! 4. min-max the map to 0..1, `* 255`, uint8 by truncation
@@ -11,7 +12,8 @@
 //! bit.
 
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ExtendedColorType, ImageEncoder, RgbImage};
+use image::metadata::Orientation;
+use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, RgbImage};
 
 use crate::model::Model;
 use crate::resample::resize_lanczos;
@@ -74,6 +76,26 @@ pub fn decode(bytes: &[u8]) -> Result<RgbImage, CutoutError> {
 /// declares an enormous picture is refused before any of it is decoded: the
 /// body limit bounds the bytes sent, this bounds the memory they expand to.
 pub fn decode_within(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutError> {
+    decode_tagged(bytes, max_pixels).map(|(rgb, _)| rgb)
+}
+
+/// [`decode_within`], then the picture turned upright: a phone holds its
+/// sensor sideways for a portrait and says so in an orientation tag instead
+/// of turning the pixels. Viewers honour the tag; a cutout written without
+/// it would come out on its side. This is Pillow's `ImageOps.exif_transpose`,
+/// which rembg's `remove` applies before anything else.
+pub fn decode_upright(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutError> {
+    let (rgb, orientation) = decode_tagged(bytes, max_pixels)?;
+    if orientation == Orientation::NoTransforms {
+        return Ok(rgb);
+    }
+    let mut img = DynamicImage::ImageRgb8(rgb);
+    img.apply_orientation(orientation);
+    Ok(img.into_rgb8())
+}
+
+/// The pixels as stored, and the orientation the file asks for.
+fn decode_tagged(bytes: &[u8], max_pixels: u64) -> Result<(RgbImage, Orientation), CutoutError> {
     if bytes.starts_with(&[0xFF, 0xD8]) {
         return decode_jpeg(bytes, max_pixels);
     }
@@ -92,10 +114,52 @@ pub fn decode_within(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutEr
     let mut limits = image::Limits::default();
     limits.max_alloc = Some((w as u64 * h as u64 * 8).max(64 << 20));
     reader.limits(limits);
-    reader
-        .decode()
-        .map(|img| img.into_rgb8())
-        .map_err(|e| CutoutError::Decode(e.to_string()))
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| CutoutError::Decode(e.to_string()))?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let img =
+        DynamicImage::from_decoder(decoder).map_err(|e| CutoutError::Decode(e.to_string()))?;
+    Ok((img.into_rgb8(), orientation))
+}
+
+/// The orientation in a JPEG's Exif segment (the APP1 payload), when it has
+/// one: tag 0x0112 in the first directory of the TIFF structure inside.
+fn exif_orientation(app1: &[u8]) -> Option<Orientation> {
+    let tiff = app1.strip_prefix(b"Exif\0\0")?;
+    let big = match tiff.get(..2)? {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| {
+        let b: [u8; 2] = tiff.get(at..at + 2)?.try_into().ok()?;
+        Some(if big {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
+    };
+    let u32_at = |at: usize| {
+        let b: [u8; 4] = tiff.get(at..at + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    if u16_at(2)? != 42 {
+        return None;
+    }
+    let dir = u32_at(4)? as usize;
+    for i in 0..u16_at(dir)? as usize {
+        let entry = dir.checked_add(2 + i * 12)?;
+        if u16_at(entry)? == 0x0112 {
+            // A SHORT, stored in the first two bytes of the value field.
+            return Orientation::from_exif(u16_at(entry + 8)? as u8);
+        }
+    }
+    None
 }
 
 fn within(w: u64, h: u64, max_pixels: u64) -> Result<(), CutoutError> {
@@ -109,7 +173,7 @@ fn within(w: u64, h: u64, max_pixels: u64) -> Result<(), CutoutError> {
     Ok(())
 }
 
-fn decode_jpeg(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutError> {
+fn decode_jpeg(bytes: &[u8], max_pixels: u64) -> Result<(RgbImage, Orientation), CutoutError> {
     // libjpeg reports errors by longjmp, which the mozjpeg crate turns into an
     // unwind. Catch it here so a corrupt file is an error, never a dead process;
     // this only works because the crate is not built with panic=abort.
@@ -119,9 +183,18 @@ fn decode_jpeg(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutError> {
     .unwrap_or_else(|_| Err(CutoutError::Decode("corrupt JPEG".into())))
 }
 
-fn decode_jpeg_inner(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutError> {
-    let decompress =
-        mozjpeg::Decompress::new_mem(bytes).map_err(|e| CutoutError::Decode(e.to_string()))?;
+fn decode_jpeg_inner(
+    bytes: &[u8],
+    max_pixels: u64,
+) -> Result<(RgbImage, Orientation), CutoutError> {
+    let decompress = mozjpeg::Decompress::builder()
+        .with_markers(&[mozjpeg::Marker::APP(1)])
+        .from_mem(bytes)
+        .map_err(|e| CutoutError::Decode(e.to_string()))?;
+    let orientation = decompress
+        .markers()
+        .find_map(|m| exif_orientation(m.data))
+        .unwrap_or(Orientation::NoTransforms);
     // The header is read; nothing is allocated for the pixels yet.
     within(
         decompress.width() as u64,
@@ -138,7 +211,9 @@ fn decode_jpeg_inner(bytes: &[u8], max_pixels: u64) -> Result<RgbImage, CutoutEr
     image
         .finish()
         .map_err(|e| CutoutError::Decode(e.to_string()))?;
-    RgbImage::from_raw(w, h, raw).ok_or_else(|| CutoutError::Decode("jpeg buffer size".into()))
+    let rgb = RgbImage::from_raw(w, h, raw)
+        .ok_or_else(|| CutoutError::Decode("jpeg buffer size".into()))?;
+    Ok((rgb, orientation))
 }
 
 /// The RGB picture at the model's size.
@@ -297,6 +372,17 @@ pub struct Options {
     pub png_fast: bool,
     /// Refuse pictures of more pixels than this; 0 means no limit.
     pub max_pixels: u64,
+    /// Turn the picture upright by its orientation tag first (the default).
+    pub upright: bool,
+    /// Clean the old background's colour out of the soft edges
+    /// ([`crate::refine`]). `None` means only when there is a new
+    /// background to show it against.
+    pub refine: Option<bool>,
+    /// Put the subject on this colour instead of on nothing; the output is
+    /// then opaque.
+    pub background: Option<[u8; 3]>,
+    /// Trim the output to the subject.
+    pub crop: bool,
 }
 
 impl Default for Options {
@@ -305,8 +391,72 @@ impl Default for Options {
             output: Output::Png,
             png_fast: false,
             max_pixels: 0,
+            upright: true,
+            refine: None,
+            background: None,
+            crop: false,
         }
     }
+}
+
+/// A colour from `RRGGBB` or `RGB` hex, with or without a leading `#`.
+pub fn colour_of(text: &str) -> Option<[u8; 3]> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = |s: &str| u8::from_str_radix(s, 16).ok();
+    match hex.len() {
+        6 => Some([n(&hex[0..2])?, n(&hex[2..4])?, n(&hex[4..6])?]),
+        3 => {
+            let d = |i: usize| n(&hex[i..i + 1]).map(|v| v * 17);
+            Some([d(0)?, d(1)?, d(2)?])
+        }
+        _ => None,
+    }
+}
+
+/// Alpha below this is not the subject when looking for its edges: the
+/// mask of a busy background is seldom exactly zero everywhere.
+const CROP_FLOOR: u8 = 13;
+
+/// The smallest rectangle holding every pixel of the subject, as
+/// `(x, y, width, height)`; `None` when the mask is empty.
+pub fn subject_box(alpha: &[u8], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = (w as usize, h as usize);
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        let row = &alpha[y * w..(y + 1) * w];
+        let Some(first) = row.iter().position(|&a| a >= CROP_FLOOR) else {
+            continue;
+        };
+        let last = row.iter().rposition(|&a| a >= CROP_FLOOR).unwrap_or(first);
+        x0 = x0.min(first);
+        x1 = x1.max(last);
+        y0 = y0.min(y);
+        y1 = y;
+    }
+    (x1 >= x0 && y1 >= y0).then(|| {
+        (
+            x0 as u32,
+            y0 as u32,
+            (x1 - x0 + 1) as u32,
+            (y1 - y0 + 1) as u32,
+        )
+    })
+}
+
+/// The subject over a solid colour: opaque RGB.
+fn flatten(rgb: &RgbImage, alpha: &[u8], background: [u8; 3]) -> Vec<u8> {
+    let mut out = rgb.as_raw().clone();
+    for (px, &a) in out.as_chunks_mut::<3>().0.iter_mut().zip(alpha) {
+        let a = a as u32;
+        for c in 0..3 {
+            // Rounded, exact at both ends.
+            px[c] = ((px[c] as u32 * a + background[c] as u32 * (255 - a) + 127) / 255) as u8;
+        }
+    }
+    out
 }
 
 /// Milliseconds each stage of one removal took.
@@ -318,6 +468,8 @@ pub struct Stages {
     pub resize: u32,
     /// The model, including loading it when it was not resident.
     pub model: u32,
+    /// The edge colour clean-up, when asked for.
+    pub refine: u32,
     /// Composing and encoding the output.
     pub encode: u32,
 }
@@ -326,9 +478,13 @@ impl std::fmt::Display for Stages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "decode={}ms resize={}ms model={}ms encode={}ms",
-            self.decode, self.resize, self.model, self.encode
-        )
+            "decode={}ms resize={}ms model={}ms ",
+            self.decode, self.resize, self.model
+        )?;
+        if self.refine > 0 {
+            write!(f, "refine={}ms ", self.refine)?;
+        }
+        write!(f, "encode={}ms", self.encode)
     }
 }
 
@@ -337,9 +493,9 @@ impl std::fmt::Display for Stages {
 pub struct Cutout {
     /// The encoded output.
     pub bytes: Vec<u8>,
-    /// The picture's width.
+    /// The output's width.
     pub width: u32,
-    /// The picture's height.
+    /// The output's height.
     pub height: u32,
     /// Where the time went.
     pub stages: Stages,
@@ -352,8 +508,12 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     let mut stages = Stages::default();
 
     let t = std::time::Instant::now();
-    let rgb = decode_within(bytes, opts.max_pixels)?;
-    let (w, h) = rgb.dimensions();
+    let mut rgb = if opts.upright {
+        decode_upright(bytes, opts.max_pixels)?
+    } else {
+        decode_within(bytes, opts.max_pixels)?
+    };
+    let (mut w, mut h) = rgb.dimensions();
     stages.decode = ms(t);
 
     let t = std::time::Instant::now();
@@ -365,16 +525,49 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     stages.model = ms(t);
 
     let t = std::time::Instant::now();
-    let alpha = mask_to_size(&mask_of(&plane), w, h)?;
+    let mut alpha = mask_to_size(&mask_of(&plane), w, h)?;
     stages.resize += ms(t);
 
+    let colour = opts.output != Output::MaskPng;
+    if colour && opts.refine.unwrap_or(opts.background.is_some()) {
+        let t = std::time::Instant::now();
+        crate::refine::decontaminate(&mut rgb, &alpha);
+        stages.refine = ms(t).max(1);
+    }
+
     let t = std::time::Instant::now();
-    let bytes = match opts.output {
-        Output::MaskPng => {
+    if opts.crop {
+        if let Some((x, y, cw, ch)) = subject_box(&alpha, w, h) {
+            rgb = image::imageops::crop_imm(&rgb, x, y, cw, ch).to_image();
+            alpha = (y..y + ch)
+                .flat_map(|row| {
+                    let at = (row * w + x) as usize;
+                    alpha[at..at + cw as usize].iter().copied()
+                })
+                .collect();
+            (w, h) = (cw, ch);
+        }
+    }
+    let bytes = match (opts.output, opts.background) {
+        (Output::MaskPng, _) => {
             drop(rgb);
             mask_png(&alpha, w, h, opts.png_fast)?
         }
-        Output::Png | Output::Webp => {
+        (output, Some(background)) => {
+            let flat = flatten(&rgb, &alpha, background);
+            drop(rgb);
+            drop(alpha);
+            if output == Output::Webp {
+                let mut out = Vec::with_capacity(flat.len() / 4);
+                image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+                    .write_image(&flat, w, h, ExtendedColorType::Rgb8)
+                    .map_err(|e| CutoutError::Encode(e.to_string()))?;
+                out
+            } else {
+                encode_png(&flat, w, h, ExtendedColorType::Rgb8, opts.png_fast)?
+            }
+        }
+        (Output::Png | Output::Webp, None) => {
             // Let the separate planes go before encoding: the encoder only
             // needs the interleaved copy, and a large picture is large.
             let rgba = rgba_of(&rgb, &alpha);
@@ -408,7 +601,7 @@ pub fn cutout_as(
     let opts = Options {
         output,
         png_fast,
-        max_pixels: 0,
+        ..Options::default()
     };
     cutout_with(bytes, model, &opts).map(|c| c.bytes)
 }
@@ -579,6 +772,96 @@ mod tests {
             Err(CutoutError::TooLarge { .. })
         ));
         assert!(decode(&png).is_ok());
+    }
+
+    /// `testdata/sample.jpg` with an Exif segment saying how to turn it.
+    pub(crate) fn jpeg_tagged(orientation: u8, big_endian: bool) -> Vec<u8> {
+        let jpeg = std::fs::read("testdata/sample.jpg").unwrap();
+        let mut tiff: Vec<u8> = Vec::new();
+        if big_endian {
+            tiff.extend(b"MM\0\x2A\0\0\0\x08\0\x01");
+            tiff.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, orientation, 0, 0]);
+        } else {
+            tiff.extend(b"II\x2A\0\x08\0\0\0\x01\0");
+            tiff.extend([0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0]);
+        }
+        tiff.extend([0, 0, 0, 0]);
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        out.extend((tiff.len() as u16 + 8).to_be_bytes());
+        out.extend(b"Exif\0\0");
+        out.extend(tiff);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn a_phone_portrait_comes_out_upright() {
+        let plain = decode(&std::fs::read("testdata/sample.jpg").unwrap()).unwrap();
+        assert_eq!(plain.dimensions(), (960, 1200));
+        // Tag 6: the stored picture must be turned a quarter clockwise.
+        for big_endian in [true, false] {
+            let tagged = jpeg_tagged(6, big_endian);
+            // As stored: the tag changes nothing.
+            assert_eq!(decode(&tagged).unwrap(), plain);
+            let upright = decode_upright(&tagged, 0).unwrap();
+            assert_eq!(upright.dimensions(), (1200, 960));
+            // Stored top-left ends up top-right.
+            assert_eq!(upright.get_pixel(1199, 0), plain.get_pixel(0, 0));
+            assert_eq!(upright.get_pixel(0, 0), plain.get_pixel(0, 1199));
+        }
+        // Tag 3: upside down. Tag 1 and no tag: as stored.
+        let flipped = decode_upright(&jpeg_tagged(3, true), 0).unwrap();
+        assert_eq!(flipped.get_pixel(959, 1199), plain.get_pixel(0, 0));
+        assert_eq!(decode_upright(&jpeg_tagged(1, true), 0).unwrap(), plain);
+        let untagged = std::fs::read("testdata/sample.jpg").unwrap();
+        assert_eq!(decode_upright(&untagged, 0).unwrap(), plain);
+    }
+
+    #[test]
+    fn a_broken_exif_segment_is_no_orientation() {
+        assert_eq!(exif_orientation(b"Exif\0\0"), None);
+        assert_eq!(exif_orientation(b"Exif\0\0MM\0\x2A\xFF\xFF\xFF\xFF"), None);
+        assert_eq!(
+            exif_orientation(b"http://ns.adobe.com/xap/1.0/\0<x/>"),
+            None
+        );
+        // An orientation outside 1..8 is ignored.
+        let mut odd = b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01".to_vec();
+        odd.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 9, 0, 0]);
+        assert_eq!(exif_orientation(&odd), None);
+    }
+
+    #[test]
+    fn colours_parse_from_hex() {
+        assert_eq!(colour_of("ff8000"), Some([255, 128, 0]));
+        assert_eq!(colour_of("#FFF"), Some([255, 255, 255]));
+        assert_eq!(colour_of("0a0"), Some([0, 170, 0]));
+        for bad in ["", "ffff", "gggggg", "white", "+12345", "ff80001"] {
+            assert_eq!(colour_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_subject_box_ignores_faint_noise() {
+        // 6 by 4: a faint pixel in a corner, the subject in the middle.
+        let mut alpha = vec![0u8; 24];
+        alpha[0] = 5;
+        alpha[6 + 2] = 255;
+        alpha[12 + 3] = 40;
+        assert_eq!(subject_box(&alpha, 6, 4), Some((2, 1, 2, 2)));
+        assert_eq!(subject_box(&[0, 3, 12, 0], 2, 2), None);
+    }
+
+    #[test]
+    fn flattening_is_exact_at_both_ends() {
+        let mut img = RgbImage::new(3, 1);
+        for px in img.pixels_mut() {
+            *px = image::Rgb([200, 100, 0]);
+        }
+        let flat = flatten(&img, &[255, 0, 128], [10, 20, 30]);
+        assert_eq!(&flat[0..3], &[200, 100, 0]);
+        assert_eq!(&flat[3..6], &[10, 20, 30]);
+        assert_eq!(&flat[6..9], &[105, 60, 15]);
     }
 
     #[test]

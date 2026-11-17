@@ -32,6 +32,12 @@ Options for files:
                          (default name: NAME-cutout.png, or NAME-mask.png)
   -f, --format <png|webp> output format (default png, or from the -o extension)
       --mask             write the mask alone, an 8-bit greyscale PNG
+      --bg <RRGGBB>      put the subject on this colour (opaque output);
+                         cleans the edges' colour unless --no-refine
+      --refine           clean the old background's colour out of soft edges
+      --crop             trim the output to the subject
+      --no-orient        ignore the photo's orientation tag
+      --force            replace an output file that already exists
       --model <PATH>     the ONNX model (default: MODEL_PATH, else the cache;
                          fetched on first use when missing)
       --no-download      fail instead of fetching a missing model
@@ -44,7 +50,9 @@ The service (default 0.0.0.0:7000):
   GET  /metrics   Prometheus text: requests, seconds, bytes, model loaded
   POST /remove    raw image bytes (image/jpeg, image/png, image/webp) in,
                   PNG with alpha out; ?format=webp (or Accept: image/webp)
-                  for a lossless WebP, ?mask=1 for the mask alone;
+                  for a lossless WebP, ?mask=1 for the mask alone,
+                  ?bg=RRGGBB, ?refine=1, ?crop=1, ?orient=0 as the options
+                  above; errors are JSON {error, message};
                   one picture at a time, four in the service at most
 
 Configuration, by environment variable:
@@ -54,7 +62,10 @@ Configuration, by environment variable:
   MODEL_URL      where --fetch-model downloads from (default: the rembg release)
   IDLE_SECONDS   release the model after this long without a request (default 300)
   THREADS        ONNX Runtime intra-op threads for the service (default 2)
-  PNG_FAST       1 for the fast PNG encoder (larger files, quicker)
+  PNG_FAST       0 for the slow PNG encoder (about a tenth smaller files,
+                 many times slower); the fast one is the default
+  QUEUE          removals the service holds at once (default 4)
+  REQUEST_TIMEOUT  seconds before a request is answered 408 (default 75)
   MAX_PIXELS     largest picture decoded, in pixels (the service: 25000000;
                  the command: no limit; 0 for no limit)
   BIND           address to listen on (default 0.0.0.0)

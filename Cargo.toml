@@ -3,14 +3,13 @@
 # published as background-remover-server; the binary, the library, the image
 # and the repository keep the plain name.
 name = "background-remover-server"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Daniel Oh"]
 description = "Background removal as a small HTTP service: an isnet matting model through ONNX Runtime, with Pillow-exact image handling."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/daniel-oh/background-remover"
-homepage = "https://github.com/daniel-oh/background-remover"
 readme = "README.md"
 keywords = ["background-removal", "matting", "onnx", "image", "isnet"]
 categories = ["multimedia::images", "web-programming::http-server"]

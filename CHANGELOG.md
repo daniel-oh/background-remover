@@ -6,11 +6,60 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
+Output that is right for more photos and more uses, and an API that says
+what went wrong. For a photo without an orientation tag and a request
+without the new options, the pixels are the same as before.
+
+### Added
+
+- **Phone portraits come out upright.** A phone stores a portrait on its
+  side and says so in an orientation tag; the tag was ignored, and a PNG
+  cannot carry it, so the cutout came back sideways (and the model saw it
+  sideways). The picture is now turned first, as rembg's `remove` does.
+  `?orient=0` and `--no-orient` keep the stored pixels.
+- **Edge colour clean-up**, `?refine=1` and `--refine`. Soft edges (hair,
+  fur, cloth) carry the old background's colour, which shows as a halo on a
+  new one. The subject's own colour is estimated for those pixels; opaque
+  and transparent pixels are untouched.
+- **A background colour**, `?bg=RRGGBB` and `--bg`: the subject on that
+  colour, opaque. Cleans the edges first unless told not to.
+- **Crop to the subject**, `?crop=1` and `--crop`.
+- `/metrics`: a histogram of request durations
+  (`background_remover_request_duration_seconds`), the number of removals
+  in the service and the queue's size.
+- `QUEUE` and `REQUEST_TIMEOUT` set the queue's size and the time limit.
+- The command accepts `--name=value`, and `--` before file names that
+  start with a dash.
+
+### Changed
+
+- **A body that is not a picture is `422`, not `500`,** and counts as
+  refused, not failed: `outcome="failed"` now means the service's own
+  failures and is worth alerting on.
+- **Errors are JSON**, `{"error": "a_code", "message": "a sentence"}`,
+  instead of a bare sentence.
+- **The fast PNG encoder is the default.** Measured: 30 ms instead of
+  470 ms on a 1600 by 2000 cutout, for a file 6% larger; at 24 megapixels
+  0.2 s instead of 2.8 s, 11% larger. The pixels are identical. `PNG_FAST=0`
+  brings the smaller files back.
+- **The command no longer replaces an existing output file** unless
+  `--force` is given. It says so before doing the work.
+- Two commands fetching the model at once no longer write the same
+  temporary file.
+- Rust 1.100 for the build and the image.
+- For library users: `Options` has `upright`, `refine`, `background` and
+  `crop`; `Stages` has `refine`; `Config` has `queue` and
+  `timeout_seconds`; `http::REQUEST_TIMEOUT` is gone (it is configuration
+  now) and `RemoveQuery` has the new options.
+
 ### Fixed
 
 - The release workflow built the macOS binary on `macos-14`, an image
   GitHub has retired; the job was cancelled and v0.3.2's binaries were not
   published with its images. It now uses `macos-latest`.
+
 
 ## [0.3.2] - 2026-11-17
 
@@ -190,7 +239,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/daniel-oh/background-remover/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/daniel-oh/background-remover/compare/v0.2.2...v0.3.0
