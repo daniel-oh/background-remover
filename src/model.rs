@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -20,6 +20,10 @@ use crate::imageops::SIDE;
 pub struct Model {
     cfg: Config,
     session: Mutex<Option<Session>>,
+    /// Whether `session` holds a session, readable without the lock: the
+    /// lock is held for the whole of an inference, and a status endpoint
+    /// must not wait for one.
+    loaded: AtomicBool,
     /// Seconds since `epoch` at the last request; 0 means never.
     last_used: AtomicU64,
     epoch: Instant,
@@ -57,6 +61,7 @@ impl Model {
         Model {
             cfg,
             session: Mutex::new(None),
+            loaded: AtomicBool::new(false),
             last_used: AtomicU64::new(0),
             epoch: Instant::now(),
             quiet: false,
@@ -99,6 +104,7 @@ impl Model {
             .map_err(|_| "model lock poisoned".to_string())?;
         if guard.is_none() {
             *guard = Some(self.build()?);
+            self.loaded.store(true, Ordering::Relaxed);
         }
         self.last_used
             .store(self.epoch.elapsed().as_secs().max(1), Ordering::Relaxed);
@@ -133,9 +139,10 @@ impl Model {
         Ok(data[..plane].to_vec())
     }
 
-    /// Whether the session is resident right now.
+    /// Whether the session is resident right now. Never waits, even while
+    /// an inference is running.
     pub fn is_loaded(&self) -> bool {
-        self.session.lock().map(|g| g.is_some()).unwrap_or(false)
+        self.loaded.load(Ordering::Relaxed)
     }
 
     /// Drop the session once it has sat unused for the configured time.
@@ -152,6 +159,7 @@ impl Model {
             return false;
         }
         *guard = None;
+        self.loaded.store(false, Ordering::Relaxed);
         drop(guard);
         // glibc keeps freed pages unless asked; ask, so the RSS actually falls.
         #[cfg(target_os = "linux")]

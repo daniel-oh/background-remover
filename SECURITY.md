@@ -11,7 +11,8 @@ days and a fix or a plan as quickly as the problem warrants.
 
 - Anything that lets a request read or write outside its own bytes, crash
   the process, or hold resources past the documented limits (12 MiB body,
-  one inference at a time, a queue of four, 75 s per request).
+  25 megapixels, one picture in memory at a time, four in the service,
+  75 s per request).
 - Decoder issues in the image path (JPEG via libjpeg-turbo, PNG and WebP via
   the `image` crate).
 - The model checksum being bypassable.

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::fetch::{default_model_path, fetch_model, MODEL_URL};
-use crate::imageops::{cutout_as, Output};
+use crate::imageops::{cutout_with, Options, Output};
 use crate::model::{verify_checksum, Model};
 
 /// What the arguments asked for.
@@ -160,13 +160,11 @@ pub fn ensure_model(
 ) -> Result<PathBuf, String> {
     let path = match &job.model {
         Some(p) => p.clone(),
-        None => match std::env::var_os("MODEL_PATH") {
-            Some(p) => PathBuf::from(p),
-            None => default_model_path(),
-        },
+        None if cfg.model_path_set => PathBuf::from(&cfg.model_path),
+        None => default_model_path(),
     };
     if !path.exists() {
-        if job.no_download || job.model.is_some() || std::env::var_os("MODEL_PATH").is_some() {
+        if job.no_download || job.model.is_some() || cfg.model_path_set {
             return Err(format!(
                 "no model at {}\n  run `background-remover --fetch-model`, or point --model at the file",
                 path.display()
@@ -225,7 +223,7 @@ pub fn run(job: &Job, cfg: &Config) -> i32 {
     for input in &job.inputs {
         let started = Instant::now();
         let out = output_path(job, input);
-        match one(job, &model, cfg.png_fast, input, &out) {
+        match one(job, &model, cfg, input, &out) {
             Ok(bytes) => log(format!(
                 "{} -> {} ({} bytes, {:.1}s)",
                 show(input),
@@ -246,13 +244,7 @@ pub fn run(job: &Job, cfg: &Config) -> i32 {
     }
 }
 
-fn one(
-    job: &Job,
-    model: &Model,
-    png_fast: bool,
-    input: &Path,
-    out: &Path,
-) -> Result<usize, String> {
+fn one(job: &Job, model: &Model, cfg: &Config, input: &Path, out: &Path) -> Result<usize, String> {
     let bytes = if input == Path::new("-") {
         let mut v = Vec::new();
         std::io::stdin()
@@ -265,8 +257,15 @@ fn one(
     if bytes.is_empty() {
         return Err("empty input".into());
     }
-    let kind = output_kind(job, Some(out));
-    let result = cutout_as(&bytes, model, png_fast, kind).map_err(|e| e.to_string())?;
+    let opts = Options {
+        output: output_kind(job, Some(out)),
+        png_fast: cfg.png_fast,
+        // Your own files on your own machine: no limit unless MAX_PIXELS sets one.
+        max_pixels: cfg.max_pixels.unwrap_or(0),
+    };
+    let result = cutout_with(&bytes, model, &opts)
+        .map_err(|e| e.to_string())?
+        .bytes;
     if out == Path::new("-") {
         let mut stdout = std::io::stdout().lock();
         stdout

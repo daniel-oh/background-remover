@@ -9,13 +9,16 @@
 //!   `image/png` or `image/webp` → 200 `image/png` with alpha;
 //!   `?format=webp` (or `Accept: image/webp`) for a lossless WebP,
 //!   `?mask=1` for the mask alone as an 8-bit PNG
-//! - 415 for any other content type, 413 over 12 MiB, 400 for an empty body
-//!   or an unknown format, 503 when the queue is full, 408 when the whole
-//!   request runs past 75 s, 500 when the picture cannot be decoded or the
-//!   model fails.
+//! - 415 for any other content type, 413 over 12 MiB or over the pixel
+//!   limit, 400 for an empty body or an unknown format, 503 when four
+//!   requests are already in the service, 408 when the whole request runs
+//!   past 75 s, 500 when the picture cannot be decoded or the model fails.
+//!
+//! One picture is worked on at a time, from decode to encode, so the memory
+//! in use is one picture's however many requests are waiting.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -30,11 +33,12 @@ use tokio::sync::Semaphore;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 
-use crate::config::{Config, MAX_BODY_BYTES};
-use crate::imageops::{self, Output};
+use crate::config::{Config, MAX_BODY_BYTES, MAX_PIXELS};
+use crate::imageops::{self, CutoutError, Options, Output};
 use crate::model::Model;
 
-/// Requests waiting for the model before the service says "later".
+/// Removals the service holds at once, the one being worked on included,
+/// before it says "later".
 pub const QUEUE: usize = 4;
 /// Callers typically give up around 80 s; stop a little before that.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
@@ -63,8 +67,11 @@ pub struct AppState {
     pub model: Arc<Model>,
     /// The configuration the process started with.
     pub cfg: Arc<Config>,
-    /// The queue: permits for requests waiting on the model.
+    /// The queue: one permit for each removal in the service. A permit is
+    /// held until the work itself ends, not until the caller stops waiting.
     pub queue: Arc<Semaphore>,
+    /// Held while a picture is being worked on, so only one is in memory.
+    pub work: Arc<Mutex<()>>,
     /// Request counters.
     pub metrics: Arc<Metrics>,
 }
@@ -72,10 +79,16 @@ pub struct AppState {
 impl AppState {
     /// State for a fresh process.
     pub fn new(model: Model, cfg: Config) -> AppState {
+        AppState::with_model(Arc::new(model), cfg)
+    }
+
+    /// State around a model something else also holds (the idle reaper).
+    pub fn with_model(model: Arc<Model>, cfg: Config) -> AppState {
         AppState {
-            model: Arc::new(model),
+            model,
             cfg: Arc::new(cfg),
             queue: Arc::new(Semaphore::new(QUEUE)),
+            work: Arc::new(Mutex::new(())),
             metrics: Arc::new(Metrics::default()),
         }
     }
@@ -242,30 +255,63 @@ async fn remove(
     if body.len() > MAX_BODY_BYTES {
         return refuse(StatusCode::PAYLOAD_TOO_LARGE, "12 MiB at most");
     }
-    let Ok(_permit) = state.queue.try_acquire() else {
+    let Ok(permit) = state.queue.clone().try_acquire_owned() else {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "busy, try again shortly");
     };
     let model = state.model.clone();
-    let fast = state.cfg.png_fast;
+    let work = state.work.clone();
+    let opts = Options {
+        output,
+        png_fast: state.cfg.png_fast,
+        max_pixels: state.cfg.max_pixels.unwrap_or(MAX_PIXELS),
+    };
     let bytes_in = body.len();
     let started = Instant::now();
-    let job = tokio::task::spawn_blocking(move || imageops::cutout_as(&body, &model, fast, output));
+    // Set when this handler is dropped: the caller went away or the timeout
+    // fired. A job still waiting its turn then has nobody to answer.
+    let gone = Arc::new(AtomicBool::new(false));
+    let _leaving = Leaving(gone.clone());
+    let job = tokio::task::spawn_blocking(move || {
+        // The permit lives as long as the work, so the queue counts what is
+        // really in the service. A blocking task cannot be cancelled; were
+        // the permit the handler's, a timed-out request would free its place
+        // while its work went on.
+        let _permit = permit;
+        let _turn = work.lock().unwrap_or_else(|e| e.into_inner());
+        if gone.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(imageops::cutout_with(&body, &model, &opts))
+    });
     let ms = |t: Instant| t.elapsed().as_millis();
     match job.await {
-        Ok(Ok(bytes)) => {
+        Ok(Some(Ok(cutout))) => {
+            let bytes = cutout.bytes;
             let m = &state.metrics;
             m.ok.fetch_add(1, Ordering::Relaxed);
             m.millis.fetch_add(ms(started) as u64, Ordering::Relaxed);
             m.bytes_in.fetch_add(bytes_in as u64, Ordering::Relaxed);
             m.bytes_out.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             eprintln!(
-                "POST /remove 200 {output:?} in={bytes_in} out={} {}ms",
+                "POST /remove 200 {output:?} {}x{} in={bytes_in} out={} {}ms ({})",
+                cutout.width,
+                cutout.height,
                 bytes.len(),
-                ms(started)
+                ms(started),
+                cutout.stages
             );
             ([(header::CONTENT_TYPE, output.content_type())], bytes).into_response()
         }
-        Ok(Err(e)) => {
+        Ok(Some(Err(e @ CutoutError::TooLarge { .. }))) => {
+            eprintln!("POST /remove 413 in={bytes_in}: {e}");
+            refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "the picture has too many pixels",
+            )
+        }
+        // Only reachable when nobody is listening for the answer.
+        Ok(None) => StatusCode::REQUEST_TIMEOUT.into_response(),
+        Ok(Some(Err(e))) => {
             state.metrics.failed.fetch_add(1, Ordering::Relaxed);
             eprintln!("POST /remove 500 in={bytes_in} {}ms: {e}", ms(started));
             (StatusCode::INTERNAL_SERVER_ERROR, "the removal failed").into_response()
@@ -278,6 +324,15 @@ async fn remove(
             );
             (StatusCode::INTERNAL_SERVER_ERROR, "the removal failed").into_response()
         }
+    }
+}
+
+/// Marks a request as abandoned when its handler is dropped.
+struct Leaving(Arc<AtomicBool>);
+
+impl Drop for Leaving {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 

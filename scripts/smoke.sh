@@ -22,6 +22,18 @@ for _ in range(5000):
 open(sys.argv[1], "wb").write(out)
 PY
 
+# A real JPEG whose header is rewritten to claim 30000 by 30000 pixels: a
+# small upload that would decode to 2.7 GB. It must be refused, not tried.
+python3 - testdata/sample.jpg "$TMP/huge.jpg" <<'PY'
+import sys
+b = bytearray(open(sys.argv[1], "rb").read())
+at = 2
+while b[at + 1] not in (0xC0, 0xC1, 0xC2):
+    at += 2 + int.from_bytes(b[at + 2:at + 4], "big")
+b[at + 5:at + 9] = (30000).to_bytes(2, "big") * 2
+open(sys.argv[2], "wb").write(b)
+PY
+
 PORT=$PORT BIND=127.0.0.1 "$BIN" >"$TMP/log" 2>&1 &
 PID=$!
 for _ in $(seq 1 50); do
@@ -44,6 +56,7 @@ check() { # name expected-status request...
 check "good jpeg"     200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "corrupt jpeg"  500 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "corrupt png"   500 --data-binary "@$TMP/junk.jpg"     -H 'content-type: image/png'  "http://127.0.0.1:$PORT/remove"
+check "huge picture"  413 --data-binary "@$TMP/huge.jpg"     -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "empty body"    400 -X POST                            -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove"
 check "health after"  200 "http://127.0.0.1:$PORT/health"
 check "webp"          200 --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' "http://127.0.0.1:$PORT/remove?format=webp"
