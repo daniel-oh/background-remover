@@ -224,6 +224,7 @@ async fn health() -> &'static str {
 #[derive(Serialize)]
 struct Version {
     version: &'static str,
+    model: String,
     model_sha256: String,
     loaded: bool,
 }
@@ -231,6 +232,7 @@ struct Version {
 async fn version(State(state): State<AppState>) -> Json<Version> {
     Json(Version {
         version: crate::VERSION,
+        model: state.cfg.model.clone(),
         model_sha256: state.cfg.model_sha256.chars().take(16).collect(),
         loaded: state.model.is_loaded(),
     })

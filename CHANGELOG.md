@@ -6,6 +6,46 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+### Added
+
+- **Newer models.** `MODEL` (service) and `--model NAME` (command) choose
+  one by name: `isnet-general-use` (still the default), `birefnet-lite-768`,
+  `birefnet-general-lite` or `birefnet-general`. A name brings the file,
+  its checksum, where to fetch it and how it is fed and read. BiRefNet (MIT,
+  2024) cuts out people, hair, thin structures and busy scenes visibly
+  better: on six hard photos IS-Net got three visibly wrong and BiRefNet
+  none. README, "Models", has the comparison and the measurements.
+- **`birefnet-lite-768`**: BiRefNet_lite exported at 768 by 768 and
+  published as the `models-1` release. Nearly the quality of the 1024
+  export for about a third of the time and memory (3.5 s and 1.2 GB on an
+  M1 Pro against 11 s and 3.2 GB), which is what lets it run on a small
+  server. `scripts/export-birefnet.py` rebuilds it.
+- `MODEL_DIR`: a folder of models, one folder each, `MODEL_DIR/<name>/<file>`.
+  The container image sets `/models` instead of fixing `MODEL_PATH` to the
+  IS-Net file.
+- `MODEL_PROFILE` and `MODEL_SIDE` for a model file of one's own.
+- `GET /version` names the model.
+- A golden test for BiRefNet against the same model run in Python
+  (alpha within one level), in CI with the real weights.
+
+### Changed
+
+- A model whose input size does not match what it is run at is reported as
+  that, instead of as an ONNX Runtime error about dimensions.
+- `MODEL=` with a name the program does not know stops it (exit 2) instead
+  of running the default under the wrong name.
+- For library users: `Profile`, `profile::KNOWN`, `imageops::tensor_with`,
+  `mask_with`, `to_side`, `mask_from_side`, `Config::with_model`; `Config`
+  has `model`, `model_url` and `profile`; `cli::Command::FetchModel` takes
+  the model's name; `cli::Job` has `model_name`.
+
+### Notes
+
+- The resampler matches Pillow 11 and 12 bit for bit. Pillow 13.0 resizes
+  some sizes differently; references must be made with 12 or earlier.
+
 ## [0.4.1] - 2026-11-17
 
 **Use this instead of 0.4.0.** 0.4.0's container image holds a program
@@ -274,7 +314,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...v0.3.2

@@ -14,7 +14,6 @@ use ort::value::Tensor;
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
-use crate::imageops::SIDE;
 
 /// The model session, built on first use and released when idle.
 pub struct Model {
@@ -68,6 +67,11 @@ impl Model {
         }
     }
 
+    /// How this model is fed and read.
+    pub fn profile(&self) -> crate::profile::Profile {
+        self.cfg.profile
+    }
+
     /// Say nothing on stderr about loading and releasing (the command's `-q`).
     pub fn quiet(mut self, quiet: bool) -> Model {
         self.quiet = quiet;
@@ -95,8 +99,9 @@ impl Model {
         builder.commit_from_file(&self.cfg.model_path)
     }
 
-    /// Run the model on one NCHW tensor of 3 by SIDE by SIDE; returns the
-    /// first output's single plane. One inference at a time.
+    /// Run the model on one NCHW tensor of 3 by side by side (the side of
+    /// its profile); returns the first output's single plane. One inference
+    /// at a time.
     pub fn infer(&self, input: Vec<f32>) -> Result<Vec<f32>, String> {
         let mut guard = self
             .session
@@ -121,15 +126,31 @@ impl Model {
             .first()
             .map(|o| o.name().to_string())
             .ok_or("model has no outputs")?;
-        let tensor = Tensor::from_array(([1usize, 3, SIDE as usize, SIDE as usize], input))
-            .map_err(|e| e.to_string())?;
+        let side = self.cfg.profile.side as usize;
+        // A model built for another size fails inside ONNX Runtime with a
+        // message about dimensions; say what is wrong instead.
+        if let Some(dims) = session
+            .inputs()
+            .first()
+            .and_then(|i| i.dtype().tensor_shape())
+        {
+            let fixed: Vec<i64> = dims.iter().copied().collect();
+            if fixed.len() == 4 && fixed[2] > 0 && fixed[2] as usize != side {
+                return Err(format!(
+                    "the model takes {}x{} pictures but its profile says {side}; set MODEL_SIDE",
+                    fixed[2], fixed[3]
+                ));
+            }
+        }
+        let tensor =
+            Tensor::from_array(([1usize, 3, side, side], input)).map_err(|e| e.to_string())?;
         let outputs = session
             .run(ort::inputs![input_name.as_str() => tensor])
             .map_err(|e| e.to_string())?;
         let (_, data) = outputs[output_name.as_str()]
             .try_extract_tensor::<f32>()
             .map_err(|e| e.to_string())?;
-        let plane = (SIDE * SIDE) as usize;
+        let plane = side * side;
         if data.len() < plane {
             return Err(format!(
                 "model output has {} values, expected {plane}",

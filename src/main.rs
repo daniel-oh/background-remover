@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use background_remover::cli::{self, Command};
 use background_remover::config::Config;
-use background_remover::fetch::default_model_path;
 use background_remover::http::{serve, AppState};
 use background_remover::model::{verify_checksum, Model};
+use background_remover::profile;
 use background_remover::VERSION;
 
 const HELP: &str = "\
@@ -38,8 +38,11 @@ Options for files:
       --crop             trim the output to the subject
       --no-orient        ignore the photo's orientation tag
       --force            replace an output file that already exists
-      --model <PATH>     the ONNX model (default: MODEL_PATH, else the cache;
-                         fetched on first use when missing)
+      --model <NAME|PATH> the model: isnet-general-use (default; quickest),
+                         birefnet-lite-768 (better on people, hair, thin things
+                         and busy scenes; 1.4 GB), birefnet-general-lite or
+                         birefnet-general (best; slower, 3 to 4 GB), or a file.
+                         A named model is fetched on first use
       --no-download      fail instead of fetching a missing model
   -j, --threads <N>      ONNX Runtime threads (default: up to eight cores)
   -q, --quiet            no progress lines on stderr
@@ -56,10 +59,16 @@ The service (default 0.0.0.0:7000):
                   one picture at a time, four in the service at most
 
 Configuration, by environment variable:
-  MODEL_PATH     path to the ONNX model (default: the cache directory; the
-                 container image sets /models/isnet-general-use/isnet-general-use.onnx)
+  MODEL          which model: isnet-general-use (default), birefnet-lite-768,
+                 birefnet-general-lite or birefnet-general. Sets the file,
+                 its checksum, its source and how it is fed and read
+  MODEL_DIR      a folder with one folder per model: MODEL_DIR/<name>/<file>.onnx
+                 (the container image sets /models)
+  MODEL_PATH     path to the ONNX model (default: MODEL_DIR, else the cache)
   MODEL_SHA256   expected checksum of the model; the process exits 1 on a mismatch
-  MODEL_URL      where --fetch-model downloads from (default: the rembg release)
+  MODEL_URL      where --fetch-model downloads from
+  MODEL_PROFILE  for a file of your own: isnet or birefnet, how it is fed and read
+  MODEL_SIDE     for a file of your own: the square it takes, if not 1024
   IDLE_SECONDS   release the model after this long without a request (default 300)
   THREADS        ONNX Runtime intra-op threads for the service (default 2)
   PNG_FAST       0 for the slow PNG encoder (about a tenth smaller files,
@@ -79,8 +88,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match cli::parse(&args) {
         Ok(Command::Serve) => {}
-        Ok(Command::Cutout(job)) => exit(cli::run(&job, &cfg)),
-        Ok(Command::FetchModel) => {
+        Ok(Command::Cutout(job)) => {
+            if job.model_name.is_none() {
+                refuse_an_unknown_model(&cfg);
+            }
+            exit(cli::run(&job, &cfg))
+        }
+        Ok(Command::FetchModel(name)) => {
+            let cfg = match name.as_deref().and_then(profile::known) {
+                Some(known) => cfg.with_model(known),
+                None => cfg,
+            };
+            refuse_an_unknown_model(&cfg);
             let job = cli::Job::default();
             let mut log = |line: String| eprintln!("{line}");
             match cli::ensure_model(&job, &cfg, &mut log) {
@@ -106,12 +125,13 @@ fn main() {
             exit(2);
         }
     }
+    refuse_an_unknown_model(&cfg);
     if let Err(e) = verify_checksum(&cfg.model_path, &cfg.model_sha256) {
         eprintln!("{e}");
-        if std::env::var_os("MODEL_PATH").is_none() {
+        if !cfg.model_path_set {
             eprintln!(
                 "no MODEL_PATH is set; run `background-remover --fetch-model` once to put the model at {}",
-                default_model_path().display()
+                cfg.model_path
             );
         }
         exit(1);
@@ -138,6 +158,20 @@ fn main() {
             exit(1);
         }
     });
+}
+
+/// `MODEL` must be a name this program knows. A typo must not quietly run
+/// the default model under another model's name.
+fn refuse_an_unknown_model(cfg: &Config) {
+    if profile::known(&cfg.model).is_none() {
+        eprintln!(
+            "MODEL={} is not a model this program knows; it knows {}.\n\
+             For a file of your own, leave MODEL unset and give MODEL_PATH, MODEL_SHA256 and MODEL_PROFILE.",
+            cfg.model,
+            profile::names()
+        );
+        exit(2);
+    }
 }
 
 /// A plain HTTP/1.0 GET to our own /health, without pulling in a client.
