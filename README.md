@@ -78,14 +78,19 @@ service definition.
 | `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, about 20% smaller than the PNG on the test photo |
 | `POST /remove?mask=1` | `200`, `image/png`, the mask alone as 8-bit greyscale, for pipelines that composite themselves |
 | any other content type | `415` |
-| body over 12 MiB | `413` |
+| body over 12 MiB, or a picture over `MAX_PIXELS` (25 megapixels) | `413` |
 | empty body, or an unknown `format` | `400` |
-| more than four requests waiting | `503` |
+| four removals already in the service (one running, three waiting) | `503` |
 | a request running past 75 s | `408` |
 | the picture cannot be decoded, or the model fails | `500` |
 
-One inference runs at a time; a small queue absorbs bursts. Nothing is
-stored; the picture lives in memory for the duration of the request.
+One picture is worked on at a time, from decode to encode, so memory in use
+is one picture's however many are waiting; a small queue absorbs bursts. A
+picture's size is read from its header and checked before anything is
+decoded, because a file of a few kilobytes can declare a picture of a
+gigabyte. A request keeps its place in the queue until its work has really
+ended, also when its caller has stopped waiting. Nothing is stored; the
+picture lives in memory for the duration of the request.
 
 ## Configuration
 
@@ -96,7 +101,8 @@ stored; the picture lives in memory for the duration of the request.
 | `MODEL_SHA256` | the isnet-general-use hash | what the model must hash to; the process exits 1 otherwise |
 | `IDLE_SECONDS` | `300` | release the model after this long without a request; the next request reloads it in about 0.3 s |
 | `THREADS` | `2` for the service; up to eight cores for the command (`-j`) | ONNX Runtime intra-op threads |
-| `PNG_FAST` | unset | `1` for the fast PNG encoder (about a quarter larger files, several times quicker) |
+| `PNG_FAST` | unset | `1` for the fast PNG encoder. Measured on an M1 Pro: a 1600×2000 cutout encodes in 30 ms instead of 470 ms and is 6% larger; at 24 megapixels, 0.2 s instead of 2.8 s and 11% larger |
+| `MAX_PIXELS` | `25000000` for the service; no limit for the command | the largest picture decoded, in pixels (`0` for no limit). At the default the service stays inside the example's 768 MB |
 | `BIND` | `0.0.0.0` | listen address |
 | `PORT` | `7000` | listen port |
 | `CORS_ORIGINS` | unset | comma-separated origins allowed to call from a browser, or `*`; unset means no CORS headers |
@@ -166,11 +172,15 @@ Every push runs, on Linux with the real model:
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc` with warnings as errors
 - unit tests, the HTTP contract tests (in-process, no socket) and the golden parity test on both fixtures
+- the limits: a small file that declares a 900-megapixel picture is refused from its header, a burst of six gets four answers and two "later", an abandoned request keeps its place until its turn, and the status endpoints answer while the model is busy
 - a smoke test of the built binary as a process: a good JPEG, a corrupt one, WebP and mask outputs, the process still alive afterwards, and the command-line mode on a file, on stdin and on junk (`scripts/smoke.sh`)
 - the command-line mode as a real process against the golden reference, and the model fetch against a local HTTP server, with a wrong checksum rejected
 - the same suite on a 64-bit Arm runner, and a build on the minimum supported Rust (1.88)
 - `cargo deny` (licences, advisories, duplicate crates, sources), `cargo audit`, `typos`, `hadolint`
 - a container build and a Trivy scan of it for known vulnerabilities
+
+The log line for each removal says where its time went (`decode`, `resize`,
+`model`, `encode`, in milliseconds).
 
 Dependabot keeps the crates, the actions and the base images current. `main` only
 takes pull requests that pass all of it; release tags are immutable.
@@ -195,7 +205,7 @@ cargo test --release --no-default-features --features dynamic
 GOLDEN=jpeg MODEL_PATH=... cargo test --release --no-default-features --features dynamic --test golden -- --nocapture
 ```
 
-The container image builds on `rust:1.98-trixie` and runs on
+The container image builds on `rust:1.99-trixie` and runs on
 `gcr.io/distroless/cc-debian13:nonroot` (the static ONNX Runtime needs
 glibc 2.38 and GCC 13's libstdc++). `docker build -t background-remover .`
 
@@ -227,8 +237,11 @@ png = requests.post("http://127.0.0.1:7000/remove", data=open("photo.jpg", "rb")
   example).
 - The model file is checksummed before the server starts; a mismatch is a
   hard failure.
-- Requests are bounded: 12 MiB, three content types, one inference at a
-  time, a queue of four, 75 s per request.
+- Requests are bounded: 12 MiB, 25 megapixels (checked from the header,
+  before decoding), three content types, one picture in memory at a time,
+  four in the service, 75 s per request.
+- The workflows that build and publish run actions pinned to a commit, and
+  release images carry signed build provenance and an SBOM.
 - The service writes nothing to disk and logs only method, status, byte
   counts and milliseconds. Only the command-line mode ever downloads the
   model, and only when no `MODEL_PATH` or `--model` was given.

@@ -44,7 +44,8 @@ The service (default 0.0.0.0:7000):
   GET  /metrics   Prometheus text: requests, seconds, bytes, model loaded
   POST /remove    raw image bytes (image/jpeg, image/png, image/webp) in,
                   PNG with alpha out; ?format=webp (or Accept: image/webp)
-                  for a lossless WebP, ?mask=1 for the mask alone
+                  for a lossless WebP, ?mask=1 for the mask alone;
+                  one picture at a time, four in the service at most
 
 Configuration, by environment variable:
   MODEL_PATH     path to the ONNX model (default: the cache directory; the
@@ -54,6 +55,8 @@ Configuration, by environment variable:
   IDLE_SECONDS   release the model after this long without a request (default 300)
   THREADS        ONNX Runtime intra-op threads for the service (default 2)
   PNG_FAST       1 for the fast PNG encoder (larger files, quicker)
+  MAX_PIXELS     largest picture decoded, in pixels (the service: 25000000;
+                 the command: no limit; 0 for no limit)
   BIND           address to listen on (default 0.0.0.0)
   PORT           port to listen on (default 7000)
   CORS_ORIGINS   comma-separated origins allowed to call from a browser, or *
@@ -118,10 +121,7 @@ fn main() {
                 let _ = tokio::task::spawn_blocking(move || m.unload_if_idle()).await;
             }
         });
-        let state = AppState {
-            model,
-            ..AppState::new(Model::new(cfg.clone()), cfg.clone())
-        };
+        let state = AppState::with_model(model, cfg.clone());
         if let Err(e) = serve(state, &cfg.bind, cfg.port).await {
             eprintln!("server error: {e}");
             exit(1);

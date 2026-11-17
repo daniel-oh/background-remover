@@ -5,7 +5,7 @@
 # our own code. Stage two is glibc, libstdc++ and the binary, no shell, and
 # runs as the distroless nonroot user (uid 65532).
 
-FROM rust:1.98-trixie AS build
+FROM rust:1.99-trixie AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir -p src tests \

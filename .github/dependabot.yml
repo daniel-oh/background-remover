@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One pull request for the week's crates, not one each. Separate ones
+    # block each other: when two advisories are open, each update fixes one
+    # and fails the audit on the other, so none can merge.
+    groups:
+      crates:
+        patterns: ["*"]
     ignore:
       # Pinned: the static ONNX Runtime binaries are matched to this release.
       - dependency-name: ort
@@ -11,11 +17,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
     ignore:
-      # Not an action version. `dtolnay/rust-toolchain@1.88` selects the Rust
-      # release, and 1.88 is this crate's MSRV (`rust-version` in Cargo.toml).
-      # Dependabot reads it as a tag and offers 1.120, which would turn the
-      # msrv job into a second copy of the stable build.
+      # Pinned to a commit of its `stable` branch, which has no releases for
+      # Dependabot to follow; it would offer the per-Rust-version branches
+      # (1.120 and so on) instead. Raise the commit by hand.
       - dependency-name: dtolnay/rust-toolchain
   - package-ecosystem: docker
     directory: /

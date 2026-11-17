@@ -6,8 +6,41 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-17
+
+A review of the service found three ways a request could take it down or
+past its limits. All three are closed; a valid request gets the same bytes
+back as before.
+
+### Security
+
+- **A small file could exhaust the memory.** Only the upload's size was
+  limited (12 MiB), not the picture's. A JPEG well under that can declare
+  hundreds of megapixels, and decoding it needs gigabytes: in a container
+  with a memory limit the kernel kills the process. The size is now read
+  from the header and checked before anything is decoded. The service
+  refuses more than 25 megapixels with `413` (`MAX_PIXELS` changes it, `0`
+  removes it); the command has no limit unless `MAX_PIXELS` is set.
+- **The queue stopped counting after a timeout.** A request's place in the
+  queue was held by its handler. When the 75 s timeout fired the place was
+  freed, but the work could not be cancelled and went on, so slow requests
+  could pile up past four. The place now belongs to the work and is freed
+  when the work ends. A request whose caller has gone before its turn came
+  is dropped without running.
+- **Several pictures were in memory at once.** Only the model ran one at a
+  time; up to four pictures were decoded and resized together. One picture
+  is now worked on at a time, from decode to encode.
+- tokio 1.54.1 (RUSTSEC-2026-0386), rustls-webpki 0.103.17
+  (RUSTSEC-2026-0382) and webpki-roots 1.0.12 (RUSTSEC-2026-0381). The TLS
+  ones touch only the command's model download, which is checksummed.
+- Workflow actions are pinned to a commit instead of a tag, which can be
+  moved. Release images carry build provenance and an SBOM.
+
 ### Fixed
 
+- `GET /version` and `GET /metrics` waited for the running removal to end,
+  on one of two worker threads: two status calls during a removal held up
+  every other request, `/health` included. They now answer at once.
 - The release workflow wrote the GitHub release from four build jobs at
   once. They raced, and 0.3.1 was first published with two of its eight
   files. Binaries are still built in parallel but one job now publishes
@@ -15,6 +48,30 @@ uses [Semantic Versioning](https://semver.org/).
   to a release, including the release action's own), all eight or none. An
   existing tag can be published again with
   `gh workflow run release.yml -f tag=vX.Y.Z`.
+
+### Added
+
+- The log line of each removal says where the time went:
+  `1600x2000 in=745238 out=3745894 2826ms (decode=34ms resize=108ms model=2210ms encode=473ms)`.
+- `imageops::cutout_with`, taking `Options` and returning the picture's size
+  and stage timings with the bytes; `decode_within`; `AppState::with_model`;
+  `Config::from_lookup`. `cutout`, `cutout_as` and `decode` are unchanged.
+
+### Changed
+
+- `CutoutError` has a `TooLarge` variant and is now `#[non_exhaustive]`;
+  `AppState` has a `work` field and `Config` has `max_pixels` and
+  `model_path_set`. Code that matches the error exhaustively or builds
+  those structs field by field needs a line.
+- The plain RGB and alpha copies are released before encoding, and a JPEG
+  is decoded into its final buffer instead of being copied once more.
+- Rust 1.99 for the build and the image; every dependency current (`ort`
+  stays pinned). Dependabot sends one grouped pull request a week for
+  crates and one for actions: separate ones blocked each other whenever two
+  advisories were open, which is how six sat failing for a month.
+- The PNG_FAST note in the README is now a measurement (6 to 11% larger,
+  15 times quicker), and "four waiting" is corrected to four in the
+  service, the running one included.
 
 ## [0.3.1] - 2026-09-17
 
@@ -127,7 +184,8 @@ uses [Semantic Versioning](https://semver.org/).
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/daniel-oh/background-remover/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/daniel-oh/background-remover/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/daniel-oh/background-remover/compare/v0.2.1...v0.2.2

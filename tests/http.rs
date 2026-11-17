@@ -5,7 +5,7 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use background_remover::config::{Config, MAX_BODY_BYTES};
-use background_remover::http::{router, AppState};
+use background_remover::http::{router, AppState, QUEUE};
 use background_remover::model::Model;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -198,4 +198,143 @@ async fn a_real_removal_returns_a_png_with_alpha() {
         img.pixels().any(|p| p[3] == 255),
         "some of the subject is opaque"
     );
+}
+
+/// `testdata/sample.jpg` with its frame header rewritten to claim 30000 by
+/// 30000: under the body limit, far over what the memory limit could hold.
+fn jpeg_claiming_900_megapixels() -> Vec<u8> {
+    let mut jpeg =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    let mut at = 2;
+    loop {
+        let len = u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]) as usize;
+        if matches!(jpeg[at + 1], 0xC0..=0xC2) {
+            jpeg[at + 5..at + 7].copy_from_slice(&30_000u16.to_be_bytes());
+            jpeg[at + 7..at + 9].copy_from_slice(&30_000u16.to_be_bytes());
+            return jpeg;
+        }
+        at += 2 + len;
+    }
+}
+
+#[tokio::test]
+async fn a_picture_over_the_pixel_limit_is_413_and_counts_as_refused() {
+    let cfg = Config {
+        model_path: "/nonexistent.onnx".into(),
+        max_pixels: None,
+        ..Config::from_env()
+    };
+    let state = AppState::new(Model::new(cfg.clone()), cfg);
+    let req = Request::post("/remove")
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .body(Body::from(jpeg_claiming_900_megapixels()))
+        .unwrap();
+    let (status, _, _) = send(router(state.clone()), req).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let (_, body, _) = send(
+        router(state),
+        Request::get("/metrics").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("outcome=\"refused\"} 1"), "{text}");
+    assert!(text.contains("outcome=\"failed\"} 0"), "{text}");
+}
+
+/// A request whose caller has gone keeps its place in the queue until its
+/// work is really over, and does no work once its turn comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Holding the lock across the awaits is the test: it stands in for a
+// removal in progress.
+#[allow(clippy::await_holding_lock)]
+async fn an_abandoned_request_holds_its_place_until_its_turn_then_does_nothing() {
+    let cfg = Config {
+        model_path: "/nonexistent.onnx".into(),
+        ..Config::from_env()
+    };
+    let state = AppState::new(Model::new(cfg.clone()), cfg);
+    let sample =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    // Somebody else's picture is being worked on.
+    let turn = state.work.clone();
+    let busy = turn.lock().unwrap();
+
+    let req = Request::post("/remove")
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .body(Body::from(sample))
+        .unwrap();
+    let waiting = tokio::spawn(router(state.clone()).oneshot(req));
+    while state.queue.available_permits() == QUEUE {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The caller gives up; the job is still parked behind the lock.
+    waiting.abort();
+    let _ = waiting.await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        state.queue.available_permits(),
+        QUEUE - 1,
+        "the place is still taken"
+    );
+
+    drop(busy);
+    for _ in 0..200 {
+        if state.queue.available_permits() == QUEUE {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(state.queue.available_permits(), QUEUE, "the place is free");
+    // It never ran: with no model, running would have counted a failure.
+    let (_, body, _) = send(
+        router(state),
+        Request::get("/metrics").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("outcome=\"failed\"} 0"), "{text}");
+}
+
+/// Six at once: four are taken, two are told to come back, and the status
+/// endpoints answer at once while the model is busy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_fills_the_queue_and_status_stays_quick() {
+    if std::env::var("MODEL_PATH").is_err() {
+        eprintln!("http: MODEL_PATH is not set, skipping the burst");
+        return;
+    }
+    let app = app();
+    let sample =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    let removals: Vec<_> = (0..6)
+        .map(|_| {
+            let req = Request::post("/remove")
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .body(Body::from(sample.clone()))
+                .unwrap();
+            tokio::spawn(app.clone().oneshot(req))
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for path in ["/version", "/metrics", "/health"] {
+        let started = std::time::Instant::now();
+        let (status, _, _) =
+            send(app.clone(), Request::get(path).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            started.elapsed().as_millis() < 100,
+            "{path} waited {}ms behind a removal",
+            started.elapsed().as_millis()
+        );
+    }
+    let mut ok = 0;
+    let mut busy = 0;
+    for r in removals {
+        match r.await.unwrap().unwrap().status() {
+            StatusCode::OK => ok += 1,
+            StatusCode::SERVICE_UNAVAILABLE => busy += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!((ok, busy), (QUEUE, 6 - QUEUE));
 }
