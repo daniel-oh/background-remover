@@ -28,6 +28,11 @@ pub struct Config {
     pub model: String,
     /// Where the model's weights are fetched from.
     pub model_url: String,
+    /// Other known models a request may ask for by name (`MODELS`), besides
+    /// `model`. One model is in memory at a time; asking for another swaps.
+    pub choices: Vec<String>,
+    /// A folder with one folder per model (`MODEL_DIR`), when set.
+    pub model_dir: Option<String>,
     /// How the model is fed and read.
     pub profile: Profile,
     /// Path to the ONNX model.
@@ -73,10 +78,23 @@ impl Config {
             model: known.name.into(),
             model_url: known.url.into(),
             profile: known.profile,
-            model_path: cache_path(known),
+            model_path: self.path_of(known),
             model_path_set: false,
             model_sha256: known.sha256.into(),
             ..self.clone()
+        }
+    }
+
+    /// Where a known model's file is: in the models folder when there is
+    /// one, else in the per-user cache directory.
+    pub fn path_of(&self, known: &Known) -> String {
+        match &self.model_dir {
+            Some(dir) => std::path::Path::new(dir)
+                .join(known.name)
+                .join(known.file)
+                .to_string_lossy()
+                .into_owned(),
+            None => cache_path(known),
         }
     }
 
@@ -87,6 +105,7 @@ impl Config {
             v.and_then(|v| v.parse().ok()).unwrap_or(fallback)
         }
         let model = var("MODEL").unwrap_or_else(|| profile::DEFAULT.into());
+        let default = model.clone();
         // An unknown name keeps the default's details here; `main` reports
         // it and stops, so nothing runs with a mixture.
         let known = profile::known(&model)
@@ -116,6 +135,17 @@ impl Config {
                     .into_owned(),
                 None => cache_path(known),
             }),
+            model_dir: var("MODEL_DIR"),
+            choices: {
+                let mut names: Vec<String> = Vec::new();
+                for n in var("MODELS").unwrap_or_default().split(',') {
+                    let n = n.trim();
+                    if !n.is_empty() && n != default && !names.iter().any(|m| m == n) {
+                        names.push(n.to_string());
+                    }
+                }
+                names
+            },
             model_sha256: var("MODEL_SHA256").unwrap_or_else(|| known.sha256.into()),
             idle_seconds: parse(var("IDLE_SECONDS"), 300),
             threads: parse(var("THREADS"), 2),
@@ -208,6 +238,24 @@ mod tests {
             path(&d.model_path),
             "/models/isnet-general-use/isnet-general-use.onnx"
         );
+    }
+
+    #[test]
+    fn models_lists_the_others_a_request_may_ask_for() {
+        let c = Config::from_lookup(|name| match name {
+            "MODEL" => Some("birefnet-lite-768".into()),
+            "MODEL_DIR" => Some("/models".into()),
+            "MODELS" => Some(" isnet-general-use, birefnet-lite-768,,isnet-general-use ".into()),
+            _ => None,
+        });
+        assert_eq!(c.choices, vec!["isnet-general-use".to_string()]);
+        let isnet = c.with_model(profile::known("isnet-general-use").unwrap());
+        assert_eq!(
+            isnet.model_path.replace('\\', "/"),
+            "/models/isnet-general-use/isnet-general-use.onnx",
+            "a choice's file is found in the models folder too"
+        );
+        assert!(Config::from_lookup(|_| None).choices.is_empty());
     }
 
     #[test]

@@ -84,6 +84,7 @@ service definition.
 | `POST /remove?bg=RRGGBB` | the subject on that colour, opaque. Cleans the edges' colour first (see `refine`) unless `refine=0` |
 | `POST /remove?refine=1` | the old background's colour taken out of the soft edges, so hair and fur do not carry a halo onto a new background |
 | `POST /remove?crop=1` | the output trimmed to the subject |
+| `POST /remove?model=NAME` | run one of the models in `MODELS` instead of the default (`MODEL`). The `x-model` response header always names the model that ran. A name the service does not offer is `400` |
 | `POST /remove?orient=0` | the picture as stored, ignoring its orientation tag (by default a phone portrait comes back upright) |
 | any other content type | `415` |
 | body over 12 MiB, or a picture over `MAX_PIXELS` (25 megapixels) | `413` |
@@ -111,6 +112,7 @@ picture lives in memory for the duration of the request.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MODEL` | `isnet-general-use` | which model: `isnet-general-use`, `birefnet-lite-768`, `birefnet-general-lite` or `birefnet-general` (see [Models](#models)). Brings its file name, checksum, source and how it is fed and read; an unknown name stops the program |
+| `MODELS` | unset | other models a request may ask for with `?model=`, comma-separated. Each is checked at start like `MODEL`. Only one model is in memory at a time: a request for another drops the one there and loads the one asked for (about a second), so offering two costs no memory, only that second on a switch |
 | `MODEL_DIR` | unset; the image sets `/models` | a folder with one folder per model, `MODEL_DIR/<name>/<file>.onnx` |
 | `MODEL_PATH` | `MODEL_DIR`, else the cache directory (`~/Library/Caches/background-remover/` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux) | the ONNX file itself; checksummed at start. The service never downloads it; the command does, once |
 | `MODEL_PROFILE`, `MODEL_SIDE` | from `MODEL` | for a file of your own: `isnet` or `birefnet` (how the picture is scaled in and the mask read out), and the square it takes |
@@ -227,6 +229,14 @@ is checked against the same model run in Python
 A model of your own works if it takes a square float32 picture and gives a
 single-plane first output: set `MODEL_PATH`, `MODEL_SHA256`, `MODEL_PROFILE`
 and, if it is not 1024, `MODEL_SIDE`. The input name is read from the model.
+
+### Choosing per request
+
+With `MODEL=birefnet-lite-768` and `MODELS=isnet-general-use`, every request
+gets BiRefNet unless it asks for `?model=isnet-general-use`. That lets a
+caller retry with the other model when one answer looks wrong. The two never
+sit in memory together: a switch drops one and loads the other, about a
+second, so the memory limit is the larger model's alone.
 
 In the container image the models live in `/models/<name>/<file>.onnx`:
 

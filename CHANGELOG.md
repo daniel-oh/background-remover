@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
+### Added
+
+- **A request can choose the model**: `POST /remove?model=NAME`, for any
+  model listed in `MODELS` (comma-separated) besides the default `MODEL`.
+  A caller can retry with the other model when one answer looks wrong:
+  BiRefNet for most pictures, IS-Net as the second opinion.
+- **One model in memory at a time.** A request for another model drops the
+  one there and loads the one asked for (about a second), so offering two
+  models needs the memory of the larger one, not of both. Every model in
+  `MODELS` is checked at start like `MODEL`.
+- The `x-model` response header names the model that made the cutout
+  (exposed to browsers when `CORS_ORIGINS` is set).
+- `GET /version` lists `models` (the ones a request may ask for) and
+  `loaded_model` (the one in memory now). The request log names the model.
+
+### Changed
+
+- For library users: `Model::with_choices`, `infer_with`, `choice`,
+  `name_of`, `names`, `loaded_name`, `profile_of`; `Options::model`;
+  `Cutout::model`; `Config` has `choices` and `model_dir` and a `path_of`;
+  `RemoveQuery::model`.
+
 ## [0.5.0] - 2026-11-17
 
 ### Added
@@ -314,7 +338,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/daniel-oh/background-remover/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...v0.4.0
