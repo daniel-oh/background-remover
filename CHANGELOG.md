@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow built the macOS binary on `macos-14`, an image
+  GitHub has retired; the job was cancelled and v0.3.2's binaries were not
+  published with its images. It now uses `macos-latest`.
+
 ## [0.3.2] - 2026-11-17
 
 A review of the service found three ways a request could take it down or
