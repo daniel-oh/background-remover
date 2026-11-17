@@ -126,6 +126,8 @@ pub struct RemoveQuery {
     pub crop: Option<String>,
     /// `0` to leave the picture as stored, ignoring its orientation tag.
     pub orient: Option<String>,
+    /// Which model to run, by name: the default (`MODEL`) or one of `MODELS`.
+    pub model: Option<String>,
 }
 
 /// A yes-or-no option: `1`/`true`, `0`/`false`, or not given.
@@ -156,6 +158,13 @@ pub fn options_for(
         refine: flag(query.refine.as_deref(), "refine must be 0 or 1")?,
         background,
         crop: flag(query.crop.as_deref(), "crop must be 0 or 1")?.unwrap_or(false),
+        model: match query.model.as_deref() {
+            None => None,
+            Some(name) if name == cfg.model || cfg.choices.iter().any(|c| c == name) => {
+                Some(name.to_string())
+            }
+            Some(_) => return Err("model is not one this service offers; GET /version lists them"),
+        },
     })
 }
 
@@ -213,7 +222,8 @@ fn cors_for(origins: &[String]) -> Option<CorsLayer> {
         CorsLayer::new()
             .allow_origin(allow)
             .allow_methods([Method::GET, Method::POST])
-            .allow_headers([header::CONTENT_TYPE, header::ACCEPT]),
+            .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+            .expose_headers([HeaderName::from_static("x-model")]),
     )
 }
 
@@ -226,6 +236,10 @@ struct Version {
     version: &'static str,
     model: String,
     model_sha256: String,
+    /// Every model a request may ask for with `?model=`, the default first.
+    models: Vec<String>,
+    /// The model in memory now, if any.
+    loaded_model: Option<String>,
     loaded: bool,
 }
 
@@ -234,6 +248,8 @@ async fn version(State(state): State<AppState>) -> Json<Version> {
         version: crate::VERSION,
         model: state.cfg.model.clone(),
         model_sha256: state.cfg.model_sha256.chars().take(16).collect(),
+        models: state.model.names(),
+        loaded_model: state.model.loaded_name(),
         loaded: state.model.is_loaded(),
     })
 }
@@ -371,14 +387,29 @@ async fn remove(
             let bucket = BUCKETS.iter().position(|&b| seconds <= b);
             m.durations[bucket.unwrap_or(BUCKETS.len())].fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "POST /remove 200 {output:?} {}x{} in={bytes_in} out={} {}ms ({})",
+                "POST /remove 200 {} {output:?} {}x{} in={bytes_in} out={} {}ms ({})",
+                cutout.model,
                 cutout.width,
                 cutout.height,
                 bytes.len(),
                 ms(started),
                 cutout.stages
             );
-            ([(header::CONTENT_TYPE, output.content_type())], bytes).into_response()
+            // Which model made it: a caller that retries with another can
+            // tell the two answers apart.
+            let model = header::HeaderValue::from_str(&cutout.model)
+                .unwrap_or(header::HeaderValue::from_static("unknown"));
+            (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static(output.content_type()),
+                    ),
+                    (HeaderName::from_static("x-model"), model),
+                ],
+                bytes,
+            )
+                .into_response()
         }
         Ok(Some(Err(e @ CutoutError::TooLarge { .. }))) => {
             eprintln!("POST /remove 413 in={bytes_in}: {e}");

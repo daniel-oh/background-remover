@@ -452,3 +452,81 @@ async fn background_crop_and_orientation_on_a_real_removal() {
     let stored = remove("?orient=0", tagged).await;
     assert_eq!((stored.width(), stored.height()), (960, 1200));
 }
+
+#[tokio::test]
+async fn a_model_the_service_does_not_offer_is_400() {
+    for name in ["birefnet-general", "nonsense"] {
+        let req = Request::post(format!("/remove?model={name}"))
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(vec![1u8, 2, 3]))
+            .unwrap();
+        let (status, body, _) = send(app(), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        assert!(String::from_utf8(body).unwrap().contains("bad_option"));
+    }
+}
+
+/// Two models offered, requests alternating between them: each answer says
+/// which model made it, and only one model is ever in memory.
+#[tokio::test]
+async fn a_request_can_choose_the_model_and_only_one_is_in_memory() {
+    let (Ok(isnet), Ok(birefnet)) = (
+        std::env::var("MODEL_PATH"),
+        std::env::var("BIREFNET_768_PATH"),
+    ) else {
+        eprintln!("http: MODEL_PATH or BIREFNET_768_PATH is not set, skipping");
+        return;
+    };
+    let base = Config::from_lookup(|_| None);
+    let known = background_remover::profile::known("birefnet-lite-768").unwrap();
+    let default = Config {
+        model_path: birefnet,
+        model_path_set: true,
+        choices: vec!["isnet-general-use".into()],
+        ..base.with_model(known)
+    };
+    let other = Config {
+        model_path: isnet,
+        model_path_set: true,
+        ..base.clone()
+    };
+    let state = AppState::new(Model::with_choices(default.clone(), vec![other]), default);
+    let sample =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    let mut masks = Vec::new();
+    for (query, want) in [
+        ("?mask=1", "birefnet-lite-768"),
+        ("?mask=1&model=isnet-general-use", "isnet-general-use"),
+        ("?mask=1&model=birefnet-lite-768", "birefnet-lite-768"),
+    ] {
+        let req = Request::post(format!("/remove{query}"))
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(sample.clone()))
+            .unwrap();
+        let res = router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{query}");
+        assert_eq!(
+            res.headers().get("x-model").and_then(|v| v.to_str().ok()),
+            Some(want),
+            "{query}"
+        );
+        assert_eq!(state.model.loaded_name().as_deref(), Some(want));
+        masks.push(res.into_body().collect().await.unwrap().to_bytes());
+    }
+    assert_ne!(masks[0], masks[1], "the two models give different masks");
+    assert_eq!(
+        masks[0], masks[2],
+        "and switching back gives the same answer"
+    );
+
+    let (_, body, _) = send(
+        router(state),
+        Request::get("/version").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        text.contains(r#""models":["birefnet-lite-768","isnet-general-use"]"#),
+        "{text}"
+    );
+}

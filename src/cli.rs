@@ -341,6 +341,7 @@ fn one(job: &Job, model: &Model, cfg: &Config, input: &Path, out: &Path) -> Resu
         refine: job.refine,
         background: job.background,
         crop: job.crop,
+        model: None,
     };
     let result = cutout_with(&bytes, model, &opts)
         .map_err(|e| e.to_string())?

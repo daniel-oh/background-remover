@@ -411,6 +411,8 @@ pub struct Options {
     pub background: Option<[u8; 3]>,
     /// Trim the output to the subject.
     pub crop: bool,
+    /// Which of the model's choices to run, by name; `None` is the default.
+    pub model: Option<String>,
 }
 
 impl Default for Options {
@@ -423,6 +425,7 @@ impl Default for Options {
             refine: None,
             background: None,
             crop: false,
+            model: None,
         }
     }
 }
@@ -527,6 +530,8 @@ pub struct Cutout {
     pub height: u32,
     /// Where the time went.
     pub stages: Stages,
+    /// The model that ran.
+    pub model: String,
 }
 
 /// The whole job: bytes of a photo in, the chosen output out, with the
@@ -545,12 +550,20 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     stages.decode = ms(t);
 
     let t = std::time::Instant::now();
-    let profile = model.profile();
+    let choice = match opts.model.as_deref() {
+        None => 0,
+        Some(name) => model.choice(name).ok_or_else(|| {
+            CutoutError::Model(format!("{name} is not one of the models offered"))
+        })?,
+    };
+    let profile = model.profile_of(choice);
     let tensor = tensor_with(&to_side(&rgb, profile.side)?, &profile);
     stages.resize = ms(t);
 
     let t = std::time::Instant::now();
-    let plane = model.infer(tensor).map_err(CutoutError::Model)?;
+    let plane = model
+        .infer_with(choice, tensor)
+        .map_err(CutoutError::Model)?;
     stages.model = ms(t);
 
     let t = std::time::Instant::now();
@@ -616,6 +629,7 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
         width: w,
         height: h,
         stages,
+        model: model.name_of(choice).to_string(),
     })
 }
 

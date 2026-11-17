@@ -55,13 +55,17 @@ The service (default 0.0.0.0:7000):
                   PNG with alpha out; ?format=webp (or Accept: image/webp)
                   for a lossless WebP, ?mask=1 for the mask alone,
                   ?bg=RRGGBB, ?refine=1, ?crop=1, ?orient=0 as the options
-                  above; errors are JSON {error, message};
+                  above, ?model=NAME for one of MODELS; the x-model header
+                  says which model ran; errors are JSON {error, message};
                   one picture at a time, four in the service at most
 
 Configuration, by environment variable:
   MODEL          which model: isnet-general-use (default), birefnet-lite-768,
                  birefnet-general-lite or birefnet-general. Sets the file,
                  its checksum, its source and how it is fed and read
+  MODELS         other models a request may ask for with ?model=NAME,
+                 comma-separated. One model is in memory at a time; asking
+                 for another swaps them (about a second)
   MODEL_DIR      a folder with one folder per model: MODEL_DIR/<name>/<file>.onnx
                  (the container image sets /models)
   MODEL_PATH     path to the ONNX model (default: MODEL_DIR, else the cache)
@@ -136,13 +140,31 @@ fn main() {
         }
         exit(1);
     }
+    // The other models a request may ask for: each must be one this program
+    // knows, and on disk with the right checksum, before the service starts.
+    let mut others = Vec::new();
+    for name in &cfg.choices {
+        let Some(known) = profile::known(name) else {
+            eprintln!(
+                "MODELS names {name}, which is not a model this program knows; it knows {}",
+                profile::names()
+            );
+            exit(2);
+        };
+        let other = cfg.with_model(known);
+        if let Err(e) = verify_checksum(&other.model_path, &other.model_sha256) {
+            eprintln!("{name}: {e}");
+            exit(1);
+        }
+        others.push(other);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("tokio runtime");
     runtime.block_on(async move {
-        let model = Arc::new(Model::new(cfg.clone()));
+        let model = Arc::new(Model::with_choices(cfg.clone(), others));
         let reaper = model.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
