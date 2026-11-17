@@ -102,6 +102,50 @@ jobs:
         if: runner.arch == 'X64'
         run: cargo package --locked
 
+  platforms:
+    # Windows and macOS, where release.yml builds binaries. Without this job
+    # a release was the first time either was compiled: v0.4.0's Windows
+    # binary failed to build at release time on a change that had passed
+    # every check here. Builds, runs the whole suite with the real model,
+    # and runs the binary as a process on a photo.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      MODEL_PATH: ${{ github.workspace }}/.model/isnet-general-use.onnx
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Cache the model
+        id: model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .model/isnet-general-use.onnx
+          key: isnet-general-use-${{ env.MODEL_SHA256 }}
+      - name: Fetch the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .model
+          curl -sSL -o .model/isnet-general-use.onnx "$MODEL_URL"
+      - name: Test (the golden test checks the model's checksum itself)
+        run: |
+          cargo test --release --locked
+          GOLDEN=jpeg cargo test --release --locked --test golden
+      - name: The built binary runs, and cuts out a photo
+        run: |
+          cargo build --release --locked
+          target/release/background-remover --version
+          target/release/background-remover -o cutout.png testdata/sample.jpg
+          test -s cutout.png
+
   msrv:
     # The oldest Rust the crate claims to build on (Cargo.toml rust-version).
     runs-on: ubuntu-latest
@@ -145,8 +189,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   image:
-    # Proves the container builds on every change and scans it for known
-    # vulnerabilities; publishing is release.yml's job.
+    # Builds the container, runs it the way the hardened compose example
+    # does and puts a photo through it, then scans it for known
+    # vulnerabilities; publishing is release.yml's job. Building alone is
+    # not proof: v0.4.0's image built, scanned clean, and held a program
+    # that did nothing.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,6 +206,38 @@ jobs:
           tags: background-remover:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Cache the model
+        id: model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .model/isnet-general-use.onnx
+          key: isnet-general-use-${{ env.MODEL_SHA256 }}
+      - name: Fetch the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .model
+          curl -sSL -o .model/isnet-general-use.onnx "$MODEL_URL"
+      - name: The image runs, and cuts out a photo
+        run: |
+          chmod -R a+rX .model
+          docker run -d --name remover --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --memory 768m \
+            -p 127.0.0.1:7000:7000 -v "$PWD/.model:/models/isnet-general-use:ro" \
+            background-remover:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7000/health >/dev/null && break
+            sleep 1
+          done
+          version=$(docker run --rm background-remover:ci --version)
+          echo "$version"
+          test "$version" = "background-remover $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          code=$(curl -s -o cutout.png -w '%{http_code}' --max-time 120 \
+            --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' \
+            http://127.0.0.1:7000/remove)
+          docker logs remover
+          test "$code" = 200
+          test "$(head -c 4 cutout.png | od -An -tx1 | tr -d ' \n')" = 89504e47
+          test "$(docker inspect remover --format '{{.State.Running}}')" = true
       - name: Scan the image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

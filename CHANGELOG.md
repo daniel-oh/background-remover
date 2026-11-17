@@ -6,6 +6,41 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-17
+
+**Use this instead of 0.4.0.** 0.4.0's container image holds a program
+that does nothing, and its binaries were never published. Nothing else
+differs: 0.4.1 is 0.4.0 as it was meant to go out.
+
+### Fixed
+
+- **The 0.4.0 image was empty.** The Dockerfile compiles a stub first so
+  the dependencies are cached, then removed the stub's build records by
+  path so the real sources would be compiled. Cargo 1.100 keeps those
+  records somewhere else; the stub was taken for the finished program and
+  shipped. The container started, did nothing, exited 0 and was restarted,
+  for ever, with an empty log. The real sources are now touched after they
+  are copied in, which does not depend on where Cargo keeps anything, and
+  the build stops unless the binary it made prints its version.
+- **The Windows binary did not build with Rust 1.100**, which is why 0.4.0
+  has no binaries, crate or formula. A build step of `ort-sys`
+  (`copy-dylibs`, which places shared libraries beside the binary) assumes
+  the build directory layout Cargo had before 1.100. The runtime is linked
+  into the binary, so the step had nothing to do, and the feature is no
+  longer enabled.
+
+### Changed
+
+- CI runs the container it builds, the way the hardened compose example
+  does, and puts a photo through it. Before, it built the image and
+  scanned it: 0.4.0's built and scanned clean.
+- CI builds and tests on Windows and macOS on every pull request, with the
+  real model. Before, a release was the first time either was compiled.
+- The release workflow runs each image and each binary and checks the
+  version it reports before anything is tagged or published, and takes an
+  optional `rust` when run by hand, to rebuild a tag with a Rust other
+  than the one the tag names.
+
 ## [0.4.0] - 2026-11-17
 
 Output that is right for more photos and more uses, and an API that says
@@ -239,7 +274,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/daniel-oh/background-remover/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/daniel-oh/background-remover/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/daniel-oh/background-remover/compare/v0.3.0...v0.3.1

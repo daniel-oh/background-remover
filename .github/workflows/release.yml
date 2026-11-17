@@ -26,6 +26,10 @@ on:
         description: An existing release tag to build and publish again, e.g. v0.3.1
         required: true
         type: string
+      rust:
+        description: Rust release to build that tag with, when not the workflow's own (e.g. 1.99)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -35,6 +39,12 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
   # The tag being released: the pushed one, or the one named by hand.
   TAG: ${{ inputs.tag || github.ref_name }}
+  # The Rust release. RUSTUP_TOOLCHAIN makes it win over the tag's own
+  # rust-toolchain.toml: a tag is immutable, so when a tag does not build
+  # with the Rust it names (v0.4.0 on Windows, Rust 1.100), this is the only
+  # way to finish its release.
+  RUST: ${{ inputs.rust || '1.100' }}
+  RUSTUP_TOOLCHAIN: ${{ inputs.rust || '1.100' }}
 
 jobs:
   image:
@@ -72,6 +82,16 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+      - name: The image pushed is this version, and runs
+        # Before the tags are written: `manifest` needs this job, so an
+        # image that does not answer never becomes `latest`. v0.4.0's did
+        # not, and did.
+        run: |
+          version=$(docker run --rm "$IMAGE@$DIGEST" --version)
+          echo "$version"
+          test "$version" = "background-remover ${TAG#v}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
       - name: Keep the digest
         run: |
           mkdir -p digests
@@ -132,10 +152,16 @@ jobs:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: "1.100"
+          toolchain: ${{ env.RUST }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build
         run: cargo build --release --locked
+      - name: The binary is this version, and runs
+        shell: bash
+        run: |
+          version=$(target/release/background-remover --version)
+          echo "$version"
+          test "$version" = "background-remover ${TAG#v}"
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -232,7 +258,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         if: env.CARGO_REGISTRY_TOKEN != ''
         with:
-          toolchain: "1.100"
+          toolchain: ${{ env.RUST }}
       - name: Publish
         if: env.CARGO_REGISTRY_TOKEN != ''
         # crates.io versions are permanent, so publishing twice is an error.
