@@ -18,7 +18,8 @@ same job with the same numbers, and gets out of the way when idle.
 
 | | |
 |---|---|
-| Container image | `ghcr.io/daniel-oh/background-remover`, one tag for `linux/amd64` and `linux/arm64` (Raspberry Pi 5, Graviton, Apple silicon under Docker) |
+| Container image | `ghcr.io/daniel-oh/background-remover`, one tag for `linux/amd64` and `linux/arm64` (Raspberry Pi 5, Graviton, Apple silicon under Docker). `:latest` is the program alone (about 30 MB to download); you mount the models |
+| Container image, models built in | `ghcr.io/daniel-oh/background-remover:bundled` (or `:vX.Y.Z-bundled`): the same program with `birefnet-lite-768` (the default) and `isnet-general-use` inside, about 370 MB to download. Runs with nothing mounted; give it 1600 MB of memory |
 | Homebrew (macOS Apple silicon, Linux) | `brew install daniel-oh/tap/background-remover`, then `brew services start background-remover` after the one-time model download it prints |
 | Binaries, on each release | Linux x86_64, Linux aarch64, macOS Apple silicon, Windows x86_64, each with a sha256, on the [releases page](https://github.com/daniel-oh/background-remover/releases) |
 | Cargo | `cargo install background-remover-server` (the crate name; the binary is `background-remover`) |
@@ -51,6 +52,19 @@ level. An output file that already exists is left alone unless `--force`
 is given. `--help` lists every option.
 
 ## Service quick start
+
+With the models built in, nothing to download first:
+
+```sh
+docker run --rm -p 7000:7000 --memory 1600m ghcr.io/daniel-oh/background-remover:bundled
+curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' http://127.0.0.1:7000/remove > cutout.png
+# the other model, for a second opinion:
+curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' 'http://127.0.0.1:7000/remove?model=isnet-general-use' > cutout.png
+```
+
+`MODEL=isnet-general-use` makes IS-Net the default; it needs only 768 MB.
+
+Or the program alone, with a model you keep on the host:
 
 ```sh
 # 1. The model (178 MB, once), into a directory you will mount read-only.

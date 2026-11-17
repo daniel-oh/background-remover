@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-17
+
+### Added
+
+- **A container image with the models built in**:
+  `ghcr.io/daniel-oh/background-remover:bundled` and `:v0.6.1-bundled`,
+  for `linux/amd64` and `linux/arm64`. It holds `birefnet-lite-768` (the
+  default) and `isnet-general-use` (for `?model=isnet-general-use`), each
+  fetched when the image is built and refused unless its SHA-256 is the one
+  the program expects. It runs with nothing mounted, in 1600 MB. The plain
+  image (`:latest`, `:v0.6.1`) is unchanged: the program alone, models
+  mounted. `docker build --target bundled` makes it locally.
+- Both images carry NOTICE and the two licence texts in
+  `/usr/share/doc/background-remover/`, as the models' licences ask of a
+  redistribution.
+- CI builds the bundled image and runs it from a read-only root with
+  nothing mounted, through both models. The release checks the same before
+  tagging it.
+
 ## [0.6.0] - 2026-11-17
 
 ### Added
@@ -338,7 +357,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/daniel-oh/background-remover/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/daniel-oh/background-remover/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/daniel-oh/background-remover/compare/v0.4.0...v0.4.1

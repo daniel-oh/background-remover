@@ -252,6 +252,37 @@ jobs:
           test "$code" = 200
           test "$(head -c 4 cutout.png | od -An -tx1 | tr -d ' \n')" = 89504e47
           test "$(docker inspect remover --format '{{.State.Running}}')" = true
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: bundled
+          platforms: linux/amd64
+          load: true
+          tags: background-remover:ci-bundled
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The bundled image runs with nothing mounted, both models
+        # Its models must be readable by uid 65532 from a read-only root: a
+        # first build of this image set the folders to 0444 and could not
+        # open them.
+        run: |
+          docker run -d --name bundled --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --memory 1600m \
+            -p 127.0.0.1:7001:7000 background-remover:ci-bundled
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7001/health >/dev/null && break
+            sleep 1
+          done
+          for model in birefnet-lite-768 isnet-general-use; do
+            code=$(curl -s -o "cutout-$model.png" -D headers -w '%{http_code}' --max-time 180 \
+              --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' \
+              "http://127.0.0.1:7001/remove?model=$model")
+            test "$code" = 200
+            grep -qi "^x-model: $model" headers
+            test "$(head -c 4 "cutout-$model.png" | od -An -tx1 | tr -d ' \n')" = 89504e47
+          done
+          docker logs bundled
+          test "$(docker inspect bundled --format '{{.State.Running}} {{.RestartCount}}')" = "true 0"
       - name: Scan the image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

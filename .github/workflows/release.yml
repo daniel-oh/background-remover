@@ -92,16 +92,53 @@ jobs:
           test "$version" = "background-remover ${TAG#v}"
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-      - name: Keep the digest
+      - name: Build and push the bundled image by digest
+        # The same program with isnet-general-use and birefnet-lite-768
+        # inside (Dockerfile, target `bundled`), tagged `bundled`.
+        id: bundled
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: bundled
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.description=Background removal as a small HTTP service, with the isnet-general-use and birefnet-lite-768 models built in
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+      - name: The bundled image is this version, and its models load
         run: |
-          mkdir -p digests
-          touch "digests/${DIGEST#sha256:}"
+          version=$(docker run --rm "$IMAGE@$DIGEST" --version)
+          test "$version" = "background-remover ${TAG#v}"
+          docker run -d --name bundled --read-only -p 127.0.0.1:7001:7000 "$IMAGE@$DIGEST"
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7001/health >/dev/null && break
+            sleep 1
+          done
+          for model in birefnet-lite-768 isnet-general-use; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 180 \
+              --data-binary @testdata/sample.jpg -H 'content-type: image/jpeg' \
+              "http://127.0.0.1:7001/remove?model=$model")
+            echo "$model: $code"
+            test "$code" = 200
+          done
+        env:
+          DIGEST: ${{ steps.bundled.outputs.digest }}
+      - name: Keep the digests
+        run: |
+          mkdir -p digests/slim digests/bundled
+          touch "digests/slim/${DIGEST#sha256:}" "digests/bundled/${BUNDLED#sha256:}"
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          BUNDLED: ${{ steps.bundled.outputs.digest }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: digests/*
+          path: digests/
           if-no-files-found: error
           retention-days: 1
 
@@ -126,8 +163,12 @@ jobs:
           VERSION=$TAG
           docker buildx imagetools create \
             -t "$IMAGE:latest" -t "$IMAGE:$VERSION" -t "$IMAGE:sha-${GITHUB_SHA::7}" \
-            $(printf "$IMAGE@sha256:%s " *)
+            $(cd slim && printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools create \
+            -t "$IMAGE:bundled" -t "$IMAGE:$VERSION-bundled" \
+            $(cd bundled && printf "$IMAGE@sha256:%s " *)
           docker buildx imagetools inspect "$IMAGE:$VERSION"
+          docker buildx imagetools inspect "$IMAGE:$VERSION-bundled"
 
   binary:
     strategy:
