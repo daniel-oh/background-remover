@@ -10,6 +10,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod facts;
 pub mod fetch;
 pub mod http;
 pub mod imageops;

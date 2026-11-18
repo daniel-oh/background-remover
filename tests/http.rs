@@ -530,3 +530,178 @@ async fn a_request_can_choose_the_model_and_only_one_is_in_memory() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn ready_says_whether_a_model_is_in_memory() {
+    let (status, body, _) = send(app(), Request::get("/ready").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(String::from_utf8(body)
+        .unwrap()
+        .contains(r#""ready":false"#));
+}
+
+#[tokio::test]
+async fn bad_focus_size_and_auto_are_400() {
+    for query in [
+        "box=0.5,0.5,0.6,0.1",
+        "box=0.1,0.1,0,0.5",
+        "box=1,2,3",
+        "point=1.5,0.5",
+        "point=0.5,0.5&box=0,0,1,1",
+        "mask=1&size=4",
+        "model=auto",
+    ] {
+        let req = Request::post(format!("/remove?{query}"))
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .body(Body::from(vec![1u8, 2, 3]))
+            .unwrap();
+        let (status, _, _) = send(app(), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn a_full_queue_says_when_to_come_back() {
+    let cfg = Config {
+        model_path: "/nonexistent.onnx".into(),
+        queue: 1,
+        ..Config::from_env()
+    };
+    let state = AppState::new(Model::new(cfg.clone()), cfg);
+    let _taken = state.queue.clone().try_acquire_owned().unwrap();
+    let req = Request::post("/remove")
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .body(Body::from(vec![1u8, 2, 3]))
+        .unwrap();
+    let res = router(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let wait: u64 = res.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(wait >= 1, "{wait}");
+}
+
+/// The facts, the small mask, a box and a point, with the real model.
+#[tokio::test]
+async fn facts_box_point_and_a_small_mask_on_a_real_removal() {
+    if std::env::var("MODEL_PATH").is_err() {
+        eprintln!("http: MODEL_PATH is not set, skipping");
+        return;
+    }
+    let sample =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/sample.jpg")).unwrap();
+    let state = AppState::new(
+        Model::new(Config {
+            model_path: std::env::var("MODEL_PATH").unwrap(),
+            ..Config::from_env()
+        }),
+        Config::from_env(),
+    );
+    let remove = |query: &'static str| {
+        let state = state.clone();
+        let sample = sample.clone();
+        async move {
+            let req = Request::post(format!("/remove{query}"))
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .body(Body::from(sample))
+                .unwrap();
+            let res = router(state).oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{query}");
+            let h = |n: &str| {
+                res.headers()
+                    .get(n)
+                    .map(|v| v.to_str().unwrap().to_string())
+                    .unwrap_or_default()
+            };
+            let facts = (
+                h("x-subject-coverage"),
+                h("x-subject-parts"),
+                h("x-soft-fraction"),
+                h("x-bbox"),
+                h("x-model-runs"),
+            );
+            let body = res.into_body().collect().await.unwrap().to_bytes();
+            (
+                facts,
+                image::load_from_memory(&body).unwrap().to_luma_alpha8(),
+            )
+        }
+    };
+
+    let ((coverage, parts, soft, bbox, runs), _) = remove("?mask=1").await;
+    let coverage: f64 = coverage.parse().unwrap();
+    assert!(coverage > 0.02 && coverage < 0.98, "{coverage}");
+    assert!(parts.parse::<u32>().unwrap() >= 1);
+    assert!((0.0..=1.0).contains(&soft.parse::<f64>().unwrap()));
+    assert_eq!(bbox.split(',').count(), 4);
+    assert_eq!(runs, "1");
+
+    let (_, small) = remove("?mask=1&size=300").await;
+    assert_eq!(small.dimensions(), (240, 300), "long side 300, aspect kept");
+
+    // A box over the top-left quarter: nothing outside it is kept.
+    let (_, boxed) = remove("?mask=1&box=0,0,0.5,0.5").await;
+    assert_eq!(boxed.dimensions(), (960, 1200));
+    assert!(boxed
+        .enumerate_pixels()
+        .filter(|(x, y, _)| *x >= 480 || *y >= 600)
+        .all(|(_, _, p)| p[0] == 0));
+
+    // A point: at least one run, at most five, and a full-size mask.
+    let ((_, _, _, _, runs), pointed) = remove("?mask=1&point=0.5,0.5").await;
+    let runs: u32 = runs.parse().unwrap();
+    assert!((1..=5).contains(&runs), "{runs}");
+    assert_eq!(pointed.dimensions(), (960, 1200));
+}
+
+/// model=auto: a picture the default gets wrong is answered by the other.
+#[tokio::test]
+async fn auto_retries_with_the_other_model_when_the_result_looks_wrong() {
+    let (Ok(isnet), Ok(birefnet)) = (
+        std::env::var("MODEL_PATH"),
+        std::env::var("BIREFNET_768_PATH"),
+    ) else {
+        eprintln!("http: MODEL_PATH or BIREFNET_768_PATH is not set, skipping");
+        return;
+    };
+    let base = Config::from_lookup(|_| None);
+    let known = background_remover::profile::known("birefnet-lite-768").unwrap();
+    let default = Config {
+        model_path: birefnet,
+        model_path_set: true,
+        choices: vec!["isnet-general-use".into()],
+        ..base.with_model(known)
+    };
+    let other = Config {
+        model_path: isnet,
+        model_path_set: true,
+        ..base.clone()
+    };
+    let state = AppState::new(Model::with_choices(default.clone(), vec![other]), default);
+    // A checkerboard has no subject: BiRefNet keeps under 1% of it, which
+    // looks wrong, so auto must try the other model.
+    let mut grey = Vec::new();
+    image::RgbImage::from_fn(256, 256, |x, y| {
+        if (x / 16 + y / 16) % 2 == 0 {
+            image::Rgb([0, 0, 0])
+        } else {
+            image::Rgb([255, 255, 255])
+        }
+    })
+    .write_to(
+        &mut std::io::Cursor::new(&mut grey),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    let req = Request::post("/remove?model=auto&mask=1")
+        .header(header::CONTENT_TYPE, "image/png")
+        .body(Body::from(grey))
+        .unwrap();
+    let res = router(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let h = |n: &str| res.headers()[n].to_str().unwrap().to_string();
+    assert_eq!(h("x-retried"), "1");
+    assert_eq!(h("x-model-runs"), "2");
+}

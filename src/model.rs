@@ -43,6 +43,30 @@ pub struct Model {
     quiet: bool,
 }
 
+/// Make glibc hand large freed blocks straight back to the system.
+///
+/// ONNX Runtime (with its arena off, as here) allocates every intermediate
+/// tensor of an inference with malloc. glibc serves blocks over 128 KiB with
+/// mmap at first, but each time one is freed it raises that threshold to the
+/// freed size (up to 32 MiB), so later tensors come from the heap, which it
+/// keeps. Measured on a 4-vCPU x86 server, birefnet-lite-768, ten pictures in
+/// a row (#35): resident memory between requests 565 to 674 MB and a peak of
+/// 1,323 MB; with the threshold fixed at 128 KiB, 265 MB flat and a peak of
+/// 903 MB, at the same speed. With one thread the peak fell from 1,686 MB.
+///
+/// Linux with glibc only; a `MALLOC_MMAP_THRESHOLD_` in the environment
+/// wins. Call once, before any threads start.
+pub fn return_large_blocks() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+        // SAFETY: mallopt only changes allocator settings; called before
+        // other threads exist.
+        unsafe {
+            libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
+        }
+    }
+}
+
 /// The weights on disk must be the ones this build was checked against.
 /// Streamed, so the 178 MB file is never held twice.
 pub fn verify_checksum(path: &str, expected: &str) -> Result<(), String> {
