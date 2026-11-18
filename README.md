@@ -234,12 +234,12 @@ of a Python package tree.
 
 ## Models
 
-| `MODEL` | Size | Licence | |
-|---|---|---|---|
-| `isnet-general-use` (default) | 178 MB | not stated (see below) | IS-Net (2022), as rembg ships it. Quickest and lightest |
-| `birefnet-lite-768` | 187 MB | MIT | BiRefNet_lite at 768 by 768, exported by this project ([`models-1`](https://github.com/daniel-oh/background-remover/releases/tag/models-1), `scripts/export-birefnet.py`). The best cutout that fits a small server |
-| `birefnet-general-lite` | 214 MB | MIT | The same model at 1024, the author's export |
-| `birefnet-general` | 928 MB | MIT | BiRefNet with the large backbone, the author's export. The best cutout here |
+| `MODEL` | Size | |
+|---|---|---|
+| `isnet-general-use` (default) | 178 MB | IS-Net (2022), as rembg ships it. Quickest and lightest |
+| `birefnet-lite-768` | 187 MB | BiRefNet_lite at 768 by 768, exported by this project ([`models-1`](https://github.com/daniel-oh/background-remover/releases/tag/models-1), `scripts/export-birefnet.py`). The best cutout that fits a small server |
+| `birefnet-general-lite` | 214 MB | The same model at 1024, the author's export |
+| `birefnet-general` | 928 MB | BiRefNet with the large backbone, the author's export. The best cutout here |
 
 Compared by eye on six hard photos (a portrait against the sea, an old
 portrait with wild hair, a bicycle in a street, a cat, a dog, a dandelion
@@ -273,16 +273,6 @@ Where they fail, from the comparison above and from the scenes in #33:
 - **A picture with no clear subject** gives a mask of noise stretched to the
   full range, because the mask is rescaled to its own minimum and maximum
   (as rembg does). Look for a high `x-soft-fraction` with low coverage.
-
-**Licences.** The BiRefNet weights are MIT, as their author publishes them.
-The IS-Net code is Apache-2.0, but its weights carry no licence of their
-own, and they were trained on DIS5K, whose terms allow "non-commercial use
-in research or educational purpose" and say commercial use is "prohibited
-even after copying, editing, processing or any operations of this
-database" without the authors' permission. Whether those terms reach a
-model trained on the data is a legal question this project cannot answer;
-BiRefNet's training data includes DIS5K as well. If you use either
-commercially, decide with that in view.
 
 The BiRefNet models take ImageNet-scaled input and give logits, so the
 program scales and reads them differently (`src/profile.rs`); what comes out

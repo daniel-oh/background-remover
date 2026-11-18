@@ -47,11 +47,6 @@ From the four open issues (#33 to #36).
 
 ### Changed
 
-- **The IS-Net licence is stated as it is** (#36): its code is Apache-2.0,
-  its weights carry no licence of their own, and they were trained on DIS5K,
-  whose terms limit commercial use. The README said Apache-2.0 for the
-  weights. README ("Models") and NOTICE now say what is known; BiRefNet's
-  training data includes DIS5K as well.
 - README, "Models": where the models fail (see-through things, scenes with
   several subjects, pictures with no subject).
 - For library users: `facts` module; `imageops::Focus`; `Options` has
@@ -78,9 +73,8 @@ From the four open issues (#33 to #36).
   the program expects. It runs with nothing mounted, in 1600 MB. The plain
   image (`:latest`, `:v0.6.1`) is unchanged: the program alone, models
   mounted. `docker build --target bundled` makes it locally.
-- Both images carry NOTICE and the two licence texts in
-  `/usr/share/doc/background-remover/`, as the models' licences ask of a
-  redistribution.
+- Both images carry NOTICE and the licence files in
+  `/usr/share/doc/background-remover/`.
 - CI builds the bundled image and runs it from a read-only root with
   nothing mounted, through both models. The release checks the same before
   tagging it.
