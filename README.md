@@ -19,7 +19,7 @@ same job with the same numbers, and gets out of the way when idle.
 | | |
 |---|---|
 | Container image | `ghcr.io/daniel-oh/background-remover`, one tag for `linux/amd64` and `linux/arm64` (Raspberry Pi 5, Graviton, Apple silicon under Docker). `:latest` is the program alone (about 30 MB to download); you mount the models |
-| Container image, models built in | `ghcr.io/daniel-oh/background-remover:bundled` (or `:vX.Y.Z-bundled`): the same program with `birefnet-lite-768` (the default) and `isnet-general-use` inside, about 370 MB to download. Runs with nothing mounted; give it 1600 MB of memory |
+| Container image, models built in | `ghcr.io/daniel-oh/background-remover:bundled` (or `:vX.Y.Z-bundled`): the same program with `birefnet-lite-768` (the default) and `isnet-general-use` inside, about 335 MB to download. Runs with nothing mounted; give it 1200 MB of memory (it peaks at 0.9 GB) |
 | Homebrew (macOS Apple silicon, Linux) | `brew install daniel-oh/tap/background-remover`, then `brew services start background-remover` after the one-time model download it prints |
 | Binaries, on each release | Linux x86_64, Linux aarch64, macOS Apple silicon, Windows x86_64, each with a sha256, on the [releases page](https://github.com/daniel-oh/background-remover/releases) |
 | Cargo | `cargo install background-remover-server` (the crate name; the binary is `background-remover`) |
@@ -56,7 +56,7 @@ is given. `--help` lists every option.
 With the models built in, nothing to download first:
 
 ```sh
-docker run --rm -p 7000:7000 --memory 1600m ghcr.io/daniel-oh/background-remover:bundled
+docker run --rm -p 7000:7000 --memory 1200m ghcr.io/daniel-oh/background-remover:bundled
 curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' http://127.0.0.1:7000/remove > cutout.png
 # the other model, for a second opinion:
 curl -s --data-binary @photo.jpg -H 'content-type: image/jpeg' 'http://127.0.0.1:7000/remove?model=isnet-general-use' > cutout.png
@@ -248,14 +248,18 @@ cut away, a ghost of the van parked behind the bicycle, the dandelion's
 stem lost and grass kept. The three BiRefNet models got all six right; the
 1024 ones are a little cleaner between bicycle spokes than the 768 one.
 
-Measured on an M1 Pro, two threads, a 1920 by 2397 portrait:
+Measured on a 4-vCPU x86 server (AMD EPYC), two threads, ten pictures from
+348x600 to 1440x2560 in a row, in the hardened container:
 
-| | Time | Peak memory |
-|---|---|---|
-| `isnet-general-use` | 2.1 s | 0.7 GB |
-| `birefnet-lite-768` | 3.5 s | 1.2 GB in the container, 1.4 GB as the command |
-| `birefnet-general-lite` | 11 s | 3.2 GB |
-| `birefnet-general` | 24 s | 3.8 GB |
+| | Time per picture | Peak memory | Between pictures |
+|---|---|---|---|
+| `isnet-general-use` | 2.7 s | about 0.7 GB | |
+| `birefnet-lite-768` | 4.5 s | 0.9 GB | 265 MB |
+| `birefnet-general-lite` | 14 s | over 3 GB (killed at a 3000m limit) | |
+| `birefnet-general` | slower still | more still | |
+
+More threads did not help under a two-CPU limit (4.4 s at four threads).
+On an M1 Pro the times are about a third lower.
 
 Where they fail, from the comparison above and from the scenes in #33:
 
@@ -295,7 +299,7 @@ With `MODEL=birefnet-lite-768` and `MODELS=isnet-general-use`, every request
 gets BiRefNet unless it asks for `?model=isnet-general-use`. That lets a
 caller retry with the other model when one answer looks wrong. The two never
 sit in memory together: a switch drops one and loads the other, about a
-second, so the memory limit is the larger model's alone.
+second, so the memory limit is the larger model's alone: 1200 MB is enough.
 
 In the container image the models live in `/models/<name>/<file>.onnx`:
 

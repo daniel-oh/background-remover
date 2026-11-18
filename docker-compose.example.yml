@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       # Which model; its file is read from /models/<name>/<file> (README).
-      # birefnet-lite-768 is the better cutout and wants mem_limit 1600m.
+      # birefnet-lite-768 is the better cutout and wants mem_limit 1200m.
       - MODEL=isnet-general-use
       # Others a request may ask for with ?model=NAME (one in memory at a time):
       # - MODELS=birefnet-lite-768

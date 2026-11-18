@@ -413,7 +413,7 @@ pub struct Options {
     pub crop: bool,
     /// Which of the model's choices to run, by name; `None` is the default.
     pub model: Option<String>,
-    /// When the result looks wrong ([`Facts::looks_wrong`]), run the
+    /// When the result looks wrong ([`crate::facts::Facts::looks_wrong`]), run the
     /// model's other choice too and keep its answer if that one looks right.
     pub auto: bool,
     /// Where to look for the subject: the whole picture, a box, or around a
