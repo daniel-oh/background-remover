@@ -46,8 +46,7 @@ HEALTHCHECK --interval=30s --timeout=3s --retries=3 --start-period=5s CMD ["/usr
 ENTRYPOINT ["/usr/local/bin/background-remover"]
 
 # The models built in, each fetched by the builder and refused unless it has
-# the checksum the program expects (the same as src/profile.rs). The
-# licences of both (Apache-2.0, MIT) are in /usr/share/doc/background-remover.
+# the checksum the program expects (the same as src/profile.rs).
 # BiRefNet by default, IS-Net for requests that ask for it: one model is in
 # memory at a time; it peaks at 0.9 GB, so a 1200 MB limit covers both.
 # --chmod sets the folders ADD creates as well as the file, so 0444 left the
