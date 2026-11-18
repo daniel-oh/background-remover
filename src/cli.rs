@@ -66,6 +66,10 @@ pub struct Job {
     pub no_orient: bool,
     /// Replace an output file that already exists.
     pub force: bool,
+    /// Where to look for the subject (`--box`, `--point`).
+    pub focus: crate::imageops::Focus,
+    /// With `--mask`: the long side of the mask written (`--size`).
+    pub mask_size: Option<u32>,
 }
 
 /// Parse the arguments after the program name. Errors are usage errors.
@@ -141,6 +145,36 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--crop" => job.crop = true,
             "--no-orient" => job.no_orient = true,
             "--force" => job.force = true,
+            "--box" | "--point" => {
+                let v = value(a, it.next())?;
+                let nums: Vec<f64> = v
+                    .split(',')
+                    .map(|p| p.trim().parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| format!("{a} {v}: numbers from 0 to 1, comma-separated"))?;
+                if nums.iter().any(|n| !(0.0..=1.0).contains(n)) {
+                    return Err(format!("{a} {v}: each number from 0 to 1"));
+                }
+                job.focus = match (a.as_str(), nums.as_slice()) {
+                    ("--box", &[x, y, w, h])
+                        if w > 0.0 && h > 0.0 && x + w <= 1.0 && y + h <= 1.0 =>
+                    {
+                        crate::imageops::Focus::Box(x, y, w, h)
+                    }
+                    ("--point", &[x, y]) => crate::imageops::Focus::Point(x, y),
+                    ("--box", _) => return Err(format!("--box {v}: x,y,w,h inside the picture")),
+                    _ => return Err(format!("--point {v}: x,y")),
+                }
+            }
+            "--size" => {
+                job.mask_size = Some(
+                    value(a, it.next())?
+                        .parse()
+                        .ok()
+                        .filter(|n| (16..=8192).contains(n))
+                        .ok_or("--size needs a number from 16 to 8192")?,
+                )
+            }
             "-" => job.inputs.push(PathBuf::from("-")),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => job.inputs.push(PathBuf::from(s)),
@@ -342,6 +376,9 @@ fn one(job: &Job, model: &Model, cfg: &Config, input: &Path, out: &Path) -> Resu
         background: job.background,
         crop: job.crop,
         model: None,
+        auto: false,
+        focus: job.focus,
+        mask_size: job.mask_size,
     };
     let result = cutout_with(&bytes, model, &opts)
         .map_err(|e| e.to_string())?

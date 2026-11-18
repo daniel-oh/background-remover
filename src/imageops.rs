@@ -413,7 +413,43 @@ pub struct Options {
     pub crop: bool,
     /// Which of the model's choices to run, by name; `None` is the default.
     pub model: Option<String>,
+    /// When the result looks wrong ([`Facts::looks_wrong`]), run the
+    /// model's other choice too and keep its answer if that one looks right.
+    pub auto: bool,
+    /// Where to look for the subject: the whole picture, a box, or around a
+    /// point.
+    pub focus: Focus,
+    /// For the mask output: scale it down so its long side is at most this.
+    pub mask_size: Option<u32>,
 }
+
+/// Where to look for the subject. Coordinates are fractions of the picture,
+/// 0 to 1, from the top left.
+///
+/// A scene with several things in it has no single subject, and a model
+/// asked about the whole of it picks one, or a part, or the background. Run
+/// on a region around one thing, the same model cuts it out cleanly (#33).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Focus {
+    /// The whole picture.
+    #[default]
+    Whole,
+    /// The subject inside this box, `x, y, w, h`. The model sees the box
+    /// with a margin; outside the box the result is transparent.
+    Box(f64, f64, f64, f64),
+    /// The subject at this point, `x, y`: a box around it that grows until
+    /// the subject no longer touches its edge.
+    Point(f64, f64),
+}
+
+/// Margin added round a box on each side, as a share of the box's size.
+const BOX_MARGIN: f64 = 0.08;
+/// A point's first box, as a share of the picture's shorter side.
+const POINT_START: f64 = 0.4;
+/// How much a point's box grows each time the subject touches its edge.
+const POINT_GROWTH: f64 = 1.4;
+/// Model runs a point may take at most; the last is the whole picture.
+const POINT_RUNS: u32 = 5;
 
 impl Default for Options {
     fn default() -> Options {
@@ -426,6 +462,9 @@ impl Default for Options {
             background: None,
             crop: false,
             model: None,
+            auto: false,
+            focus: Focus::Whole,
+            mask_size: None,
         }
     }
 }
@@ -530,8 +569,152 @@ pub struct Cutout {
     pub height: u32,
     /// Where the time went.
     pub stages: Stages,
-    /// The model that ran.
+    /// The model whose answer this is.
     pub model: String,
+    /// What the mask says about the cutout, measured on the whole picture
+    /// before any crop.
+    pub facts: crate::facts::Facts,
+    /// `model=auto` ran the other model too.
+    pub retried: bool,
+    /// How many times a model ran.
+    pub runs: u32,
+}
+
+/// A rectangle of the picture in pixels: `x, y, w, h`.
+type Region = (u32, u32, u32, u32);
+
+/// A box in fractions as pixels, with `margin` (a share of its size) added
+/// on each side, kept inside the picture and at least one pixel.
+fn region_of(b: (f64, f64, f64, f64), margin: f64, w: u32, h: u32) -> Region {
+    let (bx, by, bw, bh) = b;
+    let (fw, fh) = (w as f64, h as f64);
+    let x0 = ((bx - bw * margin) * fw).floor().clamp(0.0, fw - 1.0);
+    let y0 = ((by - bh * margin) * fh).floor().clamp(0.0, fh - 1.0);
+    let x1 = ((bx + bw * (1.0 + margin)) * fw).ceil().clamp(x0 + 1.0, fw);
+    let y1 = ((by + bh * (1.0 + margin)) * fh).ceil().clamp(y0 + 1.0, fh);
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+}
+
+/// A square of `side` pixels centred on a point, moved to lie inside the
+/// picture and cut to it where it is larger.
+fn square_at(px: f64, py: f64, side: f64, w: u32, h: u32) -> Region {
+    let (fw, fh) = (w as f64, h as f64);
+    let sw = side.min(fw).max(1.0);
+    let sh = side.min(fh).max(1.0);
+    let x0 = (px * fw - sw / 2.0).clamp(0.0, fw - sw);
+    let y0 = (py * fh - sh / 2.0).clamp(0.0, fh - sh);
+    (x0 as u32, y0 as u32, sw as u32, sh as u32)
+}
+
+/// Whether the subject reaches an edge of `region` that is not also an edge
+/// of the picture: then the region has cut it off.
+fn touches_inner_edge(mask: &[u8], region: Region, w: u32, h: u32) -> bool {
+    let (rx, ry, rw, rh) = region;
+    let band_x = (rw / 64).max(2).min(rw);
+    let band_y = (rh / 64).max(2).min(rh);
+    let solid = |x: u32, y: u32| mask[(y * rw + x) as usize] > 127;
+    let any = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        ys.clone().any(|y| xs.clone().any(|x| solid(x, y)))
+    };
+    (rx > 0 && any(0..band_x, 0..rh))
+        || (ry > 0 && any(0..rw, 0..band_y))
+        || (rx + rw < w && any(rw - band_x..rw, 0..rh))
+        || (ry + rh < h && any(0..rw, rh - band_y..rh))
+}
+
+/// Run one model on one region; the mask of that region at its own size.
+fn run_on(
+    rgb: &RgbImage,
+    region: Region,
+    model: &Model,
+    choice: usize,
+    stages: &mut Stages,
+) -> Result<Vec<u8>, CutoutError> {
+    let ms = |t: std::time::Instant| t.elapsed().as_millis() as u32;
+    let (rx, ry, rw, rh) = region;
+    let t = std::time::Instant::now();
+    let profile = model.profile_of(choice);
+    let whole = region == (0, 0, rgb.width(), rgb.height());
+    let tensor = if whole {
+        tensor_with(&to_side(rgb, profile.side)?, &profile)
+    } else {
+        let part = image::imageops::crop_imm(rgb, rx, ry, rw, rh).to_image();
+        tensor_with(&to_side(&part, profile.side)?, &profile)
+    };
+    stages.resize += ms(t);
+    let t = std::time::Instant::now();
+    let plane = model
+        .infer_with(choice, tensor)
+        .map_err(CutoutError::Model)?;
+    stages.model += ms(t);
+    let t = std::time::Instant::now();
+    let mask = mask_from_side(&mask_with(&plane, profile.sigmoid), profile.side, rw, rh)?;
+    stages.resize += ms(t);
+    Ok(mask)
+}
+
+/// The mask of the whole picture for one model and a focus, and how many
+/// times the model ran.
+fn segment(
+    rgb: &RgbImage,
+    focus: Focus,
+    model: &Model,
+    choice: usize,
+    stages: &mut Stages,
+) -> Result<(Vec<u8>, u32), CutoutError> {
+    let (w, h) = rgb.dimensions();
+    let whole: Region = (0, 0, w, h);
+    let (region, mask, runs) = match focus {
+        Focus::Whole => (whole, run_on(rgb, whole, model, choice, stages)?, 1),
+        Focus::Box(x, y, bw, bh) => {
+            let region = region_of((x, y, bw, bh), BOX_MARGIN, w, h);
+            let mut mask = run_on(rgb, region, model, choice, stages)?;
+            // Outside the box itself (the margin included) is not the subject.
+            let inner = region_of((x, y, bw, bh), 0.0, w, h);
+            let (rx, ry, rw, _) = region;
+            for (i, a) in mask.iter_mut().enumerate() {
+                let (px, py) = (rx + i as u32 % rw, ry + i as u32 / rw);
+                if px < inner.0
+                    || py < inner.1
+                    || px >= inner.0 + inner.2
+                    || py >= inner.1 + inner.3
+                {
+                    *a = 0;
+                }
+            }
+            (region, mask, 1)
+        }
+        Focus::Point(px, py) => {
+            let mut side = POINT_START * w.min(h) as f64;
+            let mut runs = 0;
+            loop {
+                let region = if runs + 1 >= POINT_RUNS {
+                    whole
+                } else {
+                    square_at(px, py, side, w, h)
+                };
+                let mask = run_on(rgb, region, model, choice, stages)?;
+                runs += 1;
+                if region == whole || !touches_inner_edge(&mask, region, w, h) {
+                    break (region, mask, runs);
+                }
+                side *= POINT_GROWTH;
+            }
+        }
+    };
+    if region == whole {
+        return Ok((mask, runs));
+    }
+    let t = std::time::Instant::now();
+    let (rx, ry, rw, rh) = region;
+    let mut full = vec![0u8; (w * h) as usize];
+    for row in 0..rh {
+        let to = ((ry + row) * w + rx) as usize;
+        let from = (row * rw) as usize;
+        full[to..to + rw as usize].copy_from_slice(&mask[from..from + rw as usize]);
+    }
+    stages.resize += t.elapsed().as_millis() as u32;
+    Ok((full, runs))
 }
 
 /// The whole job: bytes of a photo in, the chosen output out, with the
@@ -549,26 +732,26 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     let (mut w, mut h) = rgb.dimensions();
     stages.decode = ms(t);
 
-    let t = std::time::Instant::now();
-    let choice = match opts.model.as_deref() {
+    let mut choice = match opts.model.as_deref() {
         None => 0,
         Some(name) => model.choice(name).ok_or_else(|| {
             CutoutError::Model(format!("{name} is not one of the models offered"))
         })?,
     };
-    let profile = model.profile_of(choice);
-    let tensor = tensor_with(&to_side(&rgb, profile.side)?, &profile);
-    stages.resize = ms(t);
-
-    let t = std::time::Instant::now();
-    let plane = model
-        .infer_with(choice, tensor)
-        .map_err(CutoutError::Model)?;
-    stages.model = ms(t);
-
-    let t = std::time::Instant::now();
-    let mut alpha = mask_from_side(&mask_with(&plane, profile.sigmoid), profile.side, w, h)?;
-    stages.resize += ms(t);
+    let (mut alpha, mut runs) = segment(&rgb, opts.focus, model, choice, &mut stages)?;
+    let mut facts = crate::facts::facts(&alpha, w as usize, h as usize);
+    let mut retried = false;
+    if opts.auto && facts.looks_wrong() {
+        if let Some(other) = (0..model.names().len()).find(|&i| i != choice) {
+            let (second, more) = segment(&rgb, opts.focus, model, other, &mut stages)?;
+            runs += more;
+            retried = true;
+            let second_facts = crate::facts::facts(&second, w as usize, h as usize);
+            if !second_facts.looks_wrong() {
+                (alpha, facts, choice) = (second, second_facts, other);
+            }
+        }
+    }
 
     let colour = opts.output != Output::MaskPng;
     if colour && opts.refine.unwrap_or(opts.background.is_some()) {
@@ -593,7 +776,18 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
     let bytes = match (opts.output, opts.background) {
         (Output::MaskPng, _) => {
             drop(rgb);
-            mask_png(&alpha, w, h, opts.png_fast)?
+            match opts.mask_size {
+                Some(n) if n > 0 && n < w.max(h) => {
+                    let scale = n as f64 / w.max(h) as f64;
+                    let sw = ((w as f64 * scale).round() as u32).max(1);
+                    let sh = ((h as f64 * scale).round() as u32).max(1);
+                    let small =
+                        resize_lanczos(&alpha, w as usize, h as usize, 1, sw as usize, sh as usize);
+                    (w, h) = (sw, sh);
+                    mask_png(&small, w, h, opts.png_fast)?
+                }
+                _ => mask_png(&alpha, w, h, opts.png_fast)?,
+            }
         }
         (output, Some(background)) => {
             let flat = flatten(&rgb, &alpha, background);
@@ -630,6 +824,9 @@ pub fn cutout_with(bytes: &[u8], model: &Model, opts: &Options) -> Result<Cutout
         height: h,
         stages,
         model: model.name_of(choice).to_string(),
+        facts,
+        retried,
+        runs,
     })
 }
 
@@ -926,6 +1123,47 @@ mod tests {
         assert_eq!(&flat[0..3], &[200, 100, 0]);
         assert_eq!(&flat[3..6], &[10, 20, 30]);
         assert_eq!(&flat[6..9], &[105, 60, 15]);
+    }
+
+    #[test]
+    fn a_box_becomes_pixels_with_its_margin_inside_the_picture() {
+        assert_eq!(
+            region_of((0.25, 0.25, 0.5, 0.5), 0.0, 100, 200),
+            (25, 50, 50, 100)
+        );
+        // 8% of a 50 by 100 box is 4 and 8 pixels each side.
+        assert_eq!(
+            region_of((0.25, 0.25, 0.5, 0.5), 0.08, 100, 200),
+            (21, 42, 58, 116)
+        );
+        // At the picture's edge the margin is cut off, never outside.
+        assert_eq!(
+            region_of((0.0, 0.0, 1.0, 1.0), 0.08, 100, 200),
+            (0, 0, 100, 200)
+        );
+    }
+
+    #[test]
+    fn a_point_square_stays_inside_the_picture() {
+        assert_eq!(square_at(0.5, 0.5, 40.0, 100, 200), (30, 80, 40, 40));
+        assert_eq!(square_at(0.0, 1.0, 40.0, 100, 200), (0, 160, 40, 40));
+        // Larger than the picture: the picture.
+        assert_eq!(square_at(0.5, 0.5, 500.0, 100, 200), (0, 0, 100, 200));
+    }
+
+    #[test]
+    fn a_subject_cut_off_by_the_region_is_noticed_but_not_at_the_picture_edge() {
+        // A 20 by 20 region whose right column is solid.
+        let mut mask = vec![0u8; 400];
+        for y in 0..20 {
+            mask[y * 20 + 19] = 255;
+        }
+        // In the middle of a larger picture: the subject goes on past it.
+        assert!(touches_inner_edge(&mask, (10, 10, 20, 20), 100, 100));
+        // A 100 by 20 picture whose right edge the region shares, top and
+        // bottom too: nothing was cut off.
+        assert!(!touches_inner_edge(&mask, (80, 0, 20, 20), 100, 20));
+        assert!(!touches_inner_edge(&[0u8; 400], (10, 10, 20, 20), 100, 100));
     }
 
     #[test]

@@ -37,7 +37,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{Config, MAX_BODY_BYTES, MAX_PIXELS};
-use crate::imageops::{self, CutoutError, Options, Output};
+use crate::imageops::{self, CutoutError, Focus, Options, Output};
 use crate::model::Model;
 
 /// Removals the service holds at once, the one being worked on included,
@@ -126,8 +126,53 @@ pub struct RemoveQuery {
     pub crop: Option<String>,
     /// `0` to leave the picture as stored, ignoring its orientation tag.
     pub orient: Option<String>,
-    /// Which model to run, by name: the default (`MODEL`) or one of `MODELS`.
+    /// Which model to run, by name: the default (`MODEL`) or one of
+    /// `MODELS`; or `auto`, the default with a retry on the other when the
+    /// result looks wrong.
     pub model: Option<String>,
+    /// `x,y,w,h` in fractions: the subject inside this box.
+    #[serde(rename = "box")]
+    pub focus_box: Option<String>,
+    /// `x,y` in fractions: the subject at this point.
+    pub point: Option<String>,
+    /// With `mask=1`: the long side of the mask returned.
+    pub size: Option<String>,
+}
+
+/// Comma-separated fractions, each 0 to 1.
+fn fractions<const N: usize>(text: &str, why: &'static str) -> Result<[f64; N], &'static str> {
+    let parts: Vec<f64> = text
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| why)?;
+    let parts: [f64; N] = parts.try_into().map_err(|_| why)?;
+    if parts
+        .iter()
+        .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+    {
+        return Err(why);
+    }
+    Ok(parts)
+}
+
+/// Where a request asked the subject to be looked for.
+fn focus_for(query: &RemoveQuery) -> Result<Focus, &'static str> {
+    match (query.focus_box.as_deref(), query.point.as_deref()) {
+        (Some(_), Some(_)) => Err("give box or point, not both"),
+        (Some(b), None) => {
+            let [x, y, w, h] = fractions::<4>(b, "box must be x,y,w,h as fractions 0 to 1")?;
+            if w <= 0.0 || h <= 0.0 || x + w > 1.0 + 1e-9 || y + h > 1.0 + 1e-9 {
+                return Err("box must have a size and lie inside the picture");
+            }
+            Ok(Focus::Box(x, y, w, h))
+        }
+        (None, Some(p)) => {
+            let [x, y] = fractions::<2>(p, "point must be x,y as fractions 0 to 1")?;
+            Ok(Focus::Point(x, y))
+        }
+        (None, None) => Ok(Focus::Whole),
+    }
 }
 
 /// A yes-or-no option: `1`/`true`, `0`/`false`, or not given.
@@ -159,11 +204,28 @@ pub fn options_for(
         background,
         crop: flag(query.crop.as_deref(), "crop must be 0 or 1")?.unwrap_or(false),
         model: match query.model.as_deref() {
-            None => None,
+            None | Some("auto") => None,
             Some(name) if name == cfg.model || cfg.choices.iter().any(|c| c == name) => {
                 Some(name.to_string())
             }
             Some(_) => return Err("model is not one this service offers; GET /version lists them"),
+        },
+        auto: match query.model.as_deref() {
+            Some("auto") if cfg.choices.is_empty() => {
+                return Err("model=auto needs a second model in MODELS")
+            }
+            Some("auto") => true,
+            _ => false,
+        },
+        focus: focus_for(query)?,
+        mask_size: match query.size.as_deref() {
+            None => None,
+            Some(n) => Some(
+                n.parse::<u32>()
+                    .ok()
+                    .filter(|n| (16..=8192).contains(n))
+                    .ok_or("size must be a whole number from 16 to 8192")?,
+            ),
         },
     })
 }
@@ -194,6 +256,7 @@ pub fn router(state: AppState) -> Router {
     let cors = cors_for(&state.cfg.cors_origins);
     let router = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/version", get(version))
         .route("/metrics", get(metrics))
         .route("/remove", post(remove))
@@ -223,7 +286,7 @@ fn cors_for(origins: &[String]) -> Option<CorsLayer> {
             .allow_origin(allow)
             .allow_methods([Method::GET, Method::POST])
             .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
-            .expose_headers([HeaderName::from_static("x-model")]),
+            .expose_headers(RESULT_HEADERS.map(HeaderName::from_static)),
     )
 }
 
@@ -292,6 +355,18 @@ async fn metrics(State(state): State<AppState>) -> ([(HeaderName, &'static str);
         state.cfg.queue - state.queue.available_permits().min(state.cfg.queue),
         state.cfg.queue,
     );
+    // The process's memory, so a deployer can set its limit from what it
+    // really uses (#35). Linux only: read from /proc.
+    if let Some((now, peak)) = memory() {
+        text.push_str(&format!(
+            "# HELP process_resident_memory_bytes Resident memory size in bytes.\n\
+             # TYPE process_resident_memory_bytes gauge\n\
+             process_resident_memory_bytes {now}\n\
+             # HELP background_remover_resident_memory_peak_bytes The most resident memory this process has held.\n\
+             # TYPE background_remover_resident_memory_peak_bytes gauge\n\
+             background_remover_resident_memory_peak_bytes {peak}\n"
+        ));
+    }
     // Prometheus buckets are cumulative: each holds everything at or under it.
     let mut total = 0;
     for (i, count) in m.durations.iter().enumerate() {
@@ -348,11 +423,14 @@ async fn remove(
         return refuse(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "12 MiB at most");
     }
     let Ok(permit) = state.queue.clone().try_acquire_owned() else {
-        return refuse(
+        let mut busy = refuse(
             StatusCode::SERVICE_UNAVAILABLE,
             "busy",
             "busy, try again shortly",
         );
+        busy.headers_mut()
+            .insert(header::RETRY_AFTER, retry_after(&state).into());
+        return busy;
     };
     let model = state.model.clone();
     let work = state.work.clone();
@@ -377,6 +455,7 @@ async fn remove(
     let ms = |t: Instant| t.elapsed().as_millis();
     match job.await {
         Ok(Some(Ok(cutout))) => {
+            let described = result_headers(&cutout);
             let bytes = cutout.bytes;
             let m = &state.metrics;
             m.ok.fetch_add(1, Ordering::Relaxed);
@@ -395,21 +474,14 @@ async fn remove(
                 ms(started),
                 cutout.stages
             );
-            // Which model made it: a caller that retries with another can
-            // tell the two answers apart.
-            let model = header::HeaderValue::from_str(&cutout.model)
-                .unwrap_or(header::HeaderValue::from_static("unknown"));
-            (
-                [
-                    (
-                        header::CONTENT_TYPE,
-                        header::HeaderValue::from_static(output.content_type()),
-                    ),
-                    (HeaderName::from_static("x-model"), model),
-                ],
-                bytes,
-            )
-                .into_response()
+            let mut res = ([(header::CONTENT_TYPE, output.content_type())], bytes).into_response();
+            for (name, value) in described {
+                if let Ok(value) = header::HeaderValue::from_str(&value) {
+                    res.headers_mut()
+                        .insert(HeaderName::from_static(name), value);
+                }
+            }
+            res
         }
         Ok(Some(Err(e @ CutoutError::TooLarge { .. }))) => {
             eprintln!("POST /remove 413 in={bytes_in}: {e}");
@@ -463,6 +535,89 @@ struct Problem {
 /// An error a program can switch on and a person can read.
 fn problem(status: StatusCode, error: &'static str, message: &'static str) -> Response {
     (status, Json(Problem { error, message })).into_response()
+}
+
+/// The headers that describe a cutout (also exposed over CORS).
+const RESULT_HEADERS: [&str; 7] = [
+    "x-model",
+    "x-retried",
+    "x-model-runs",
+    "x-subject-coverage",
+    "x-subject-parts",
+    "x-soft-fraction",
+    "x-bbox",
+];
+
+/// Facts about a cutout as response headers, so a caller can judge or
+/// explain it without decoding the image (#34).
+fn result_headers(cutout: &imageops::Cutout) -> Vec<(&'static str, String)> {
+    let f = &cutout.facts;
+    let mut out = vec![
+        ("x-model", cutout.model.clone()),
+        ("x-retried", u8::from(cutout.retried).to_string()),
+        ("x-model-runs", cutout.runs.to_string()),
+        ("x-subject-coverage", format!("{:.4}", f.coverage)),
+        ("x-subject-parts", f.parts.to_string()),
+        ("x-soft-fraction", format!("{:.4}", f.soft)),
+    ];
+    if let Some((x, y, w, h)) = f.bbox {
+        out.push(("x-bbox", format!("{x:.4},{y:.4},{w:.4},{h:.4}")));
+    }
+    out
+}
+
+/// Seconds a refused caller should wait: the average removal so far times
+/// the removals ahead of it, at least one second.
+fn retry_after(state: &AppState) -> u64 {
+    let m = &state.metrics;
+    let done = m.ok.load(Ordering::Relaxed);
+    let average = if done == 0 {
+        5.0
+    } else {
+        m.millis.load(Ordering::Relaxed) as f64 / done as f64 / 1000.0
+    };
+    let ahead = state.cfg.queue - state.queue.available_permits().min(state.cfg.queue);
+    ((average * ahead.max(1) as f64).ceil() as u64).max(1)
+}
+
+#[derive(Serialize)]
+struct Ready {
+    ready: bool,
+    loaded_model: Option<String>,
+}
+
+/// 200 when a model is in memory, 503 when the next request will load one
+/// first ("warming up"). For a caller's display, not an orchestrator's
+/// readiness probe: the model loads on the first request, so a probe on
+/// this would keep a fresh service out of rotation for ever.
+async fn ready(State(state): State<AppState>) -> Response {
+    let body = Ready {
+        ready: state.model.is_loaded(),
+        loaded_model: state.model.loaded_name(),
+    };
+    let status = if body.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body)).into_response()
+}
+
+/// Resident memory now and at its highest, in bytes, from /proc/self/status
+/// (`VmRSS`, `VmHWM`). `None` where there is no /proc.
+fn memory() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let field = |name: &str| {
+        status
+            .lines()
+            .find(|l| l.starts_with(name))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u64>()
+            .ok()
+            .map(|kb| kb * 1024)
+    };
+    Some((field("VmRSS:")?, field("VmHWM:")?))
 }
 
 /// Marks a request as abandoned when its handler is dropped.

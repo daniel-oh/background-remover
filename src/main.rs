@@ -36,6 +36,10 @@ Options for files:
                          cleans the edges' colour unless --no-refine
       --refine           clean the old background's colour out of soft edges
       --crop             trim the output to the subject
+      --box <x,y,w,h>    cut out the subject inside this box (fractions 0 to 1);
+                         for scenes with several things in them
+      --point <x,y>      cut out the subject at this point (fractions 0 to 1)
+      --size <N>         with --mask: the mask's long side at most N
       --no-orient        ignore the photo's orientation tag
       --force            replace an output file that already exists
       --model <NAME|PATH> the model: isnet-general-use (default; quickest),
@@ -49,14 +53,18 @@ Options for files:
 
 The service (default 0.0.0.0:7000):
   GET  /health    200 ok
+  GET  /ready     200 when a model is in memory, 503 while it would load first
   GET  /version   JSON: version, model checksum, whether the model is loaded
   GET  /metrics   Prometheus text: requests, seconds, bytes, model loaded
   POST /remove    raw image bytes (image/jpeg, image/png, image/webp) in,
                   PNG with alpha out; ?format=webp (or Accept: image/webp)
                   for a lossless WebP, ?mask=1 for the mask alone,
                   ?bg=RRGGBB, ?refine=1, ?crop=1, ?orient=0 as the options
-                  above, ?model=NAME for one of MODELS; the x-model header
-                  says which model ran; errors are JSON {error, message};
+                  above, ?box=x,y,w,h and ?point=x,y (fractions) for one
+                  subject in a busy scene, ?size=N with ?mask=1,
+                  ?model=NAME for one of MODELS or ?model=auto (retry with
+                  the other when the result looks wrong); x-model and the
+                  other x- headers describe the result; errors are JSON;
                   one picture at a time, four in the service at most
 
 Configuration, by environment variable:
@@ -88,6 +96,7 @@ Configuration, by environment variable:
 ";
 
 fn main() {
+    background_remover::model::return_large_blocks();
     let cfg = Config::from_env();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match cli::parse(&args) {

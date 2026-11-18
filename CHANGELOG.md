@@ -6,6 +6,66 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
+From the four open issues (#33 to #36).
+
+### Fixed
+
+- **Memory grew with each request** (#35). ONNX Runtime allocates every
+  intermediate tensor with malloc, and glibc, after freeing a large block,
+  raises the size it serves with mmap to that block's size, so later
+  tensors came from a heap it keeps. On a 4-vCPU x86 server,
+  `birefnet-lite-768`, ten pictures from 348x600 to 1440x2560 in a row:
+  between requests 565 to 674 MB and a peak of 1,323 MB at two threads; at
+  one thread a peak of 1,686 MB, which an issue saw killed at 1500m. The
+  program now fixes glibc's mmap threshold at 128 KiB when it starts: 265 MB
+  flat between requests and a 903 MB peak, at the same speed and with the
+  same output. `MALLOC_MMAP_THRESHOLD_` in the environment still wins.
+
+### Added
+
+- **Focus on one subject** (#33): `?box=x,y,w,h` cuts out the subject inside
+  a box, `?point=x,y` the subject at a point (a box that grows until the
+  subject no longer touches its edge, five runs at most). For scenes with
+  several things in them, which have no single subject. `--box` and
+  `--point` for the command.
+- **Facts about each cutout** as response headers (#34): `x-subject-coverage`,
+  `x-subject-parts`, `x-soft-fraction`, `x-bbox`, and `x-retried` and
+  `x-model-runs` beside `x-model`.
+- **`?model=auto`** (#34): the default model, and the other in `MODELS` when
+  the result looks wrong (under 2% or over 85% kept, or more than five
+  pieces); the answer that looks right.
+- **`?mask=1&size=N`** (#36): the mask scaled down to a long side of `N`.
+  `--size` with `--mask` for the command.
+- **`GET /ready`** (#36): 200 when a model is in memory, 503 when the next
+  request loads one first.
+- **`Retry-After`** on a `503` for a full queue (#36), from the average
+  removal times the removals ahead.
+- **Memory in `/metrics`** (#35): `process_resident_memory_bytes` and
+  `background_remover_resident_memory_peak_bytes` (Linux).
+
+### Changed
+
+- **The IS-Net licence is stated as it is** (#36): its code is Apache-2.0,
+  its weights carry no licence of their own, and they were trained on DIS5K,
+  whose terms limit commercial use. The README said Apache-2.0 for the
+  weights. README ("Models") and NOTICE now say what is known; BiRefNet's
+  training data includes DIS5K as well.
+- README, "Models": where the models fail (see-through things, scenes with
+  several subjects, pictures with no subject).
+- For library users: `facts` module; `imageops::Focus`; `Options` has
+  `auto`, `focus`, `mask_size`; `Cutout` has `facts`, `retried`, `runs`;
+  `model::return_large_blocks`.
+
+### Not done
+
+- Polygons as JSON (`?outline=1`, #36): optional in the issue, and callers
+  trace the small mask themselves.
+- A quantized `birefnet-lite-768` (#35): weights are 187 of the 903 MB peak,
+  so int8 weights would save little, at a risk to hair edges.
+- Several masks at once (`?subjects=all`, #33).
+
 ## [0.6.1] - 2026-11-17
 
 ### Added
@@ -357,7 +417,8 @@ back as before.
 - A distroless, non-root container image published to GitHub Container
   Registry.
 
-[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/daniel-oh/background-remover/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/daniel-oh/background-remover/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/daniel-oh/background-remover/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/daniel-oh/background-remover/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/daniel-oh/background-remover/compare/v0.4.1...v0.5.0

@@ -89,16 +89,21 @@ service definition.
 
 | Request | Response |
 |---|---|
-| `GET /health` | `200 ok` |
-| `GET /version` | `200` JSON: `version`, `model_sha256` (first 16 hex), `loaded` |
-| `GET /metrics` | `200` Prometheus text: requests by outcome, seconds, bytes in and out, model loaded |
+| `GET /health` | `200 ok`: the process is up |
+| `GET /ready` | `200 {"ready":true,...}` when a model is in memory; `503 {"ready":false}` when the next request will load one first (about a second). For showing "warming up", not for an orchestrator's readiness probe: the model loads on the first request, so a probe on this would keep a fresh service out of rotation |
+| `GET /version` | `200` JSON: `version`, `model`, `model_sha256` (first 16 hex), `models` (the ones a request may ask for), `loaded_model`, `loaded` |
+| `GET /metrics` | `200` Prometheus text: requests by outcome, a duration histogram, bytes in and out, removals in the service, model loaded, resident memory now and at its peak (Linux) |
 | `POST /remove`, body: raw image bytes, `content-type: image/jpeg`, `image/png` or `image/webp` | `200`, `content-type: image/png`, RGBA at the picture's size |
 | `POST /remove?format=webp` (or `Accept: image/webp`) | `200`, `image/webp`, lossless with alpha, about 20% smaller than the PNG on the test photo |
 | `POST /remove?mask=1` | `200`, `image/png`, the mask alone as 8-bit greyscale, for pipelines that composite themselves |
+| `POST /remove?mask=1&size=N` | the mask scaled down so its long side is at most `N` (16 to 8192): less to encode and send when a caller only traces an outline |
+| `POST /remove?box=x,y,w,h` | the subject inside this box (fractions 0 to 1 of the picture). The model sees the box with an 8% margin; outside the box the result is transparent. For scenes with several things in them, where the whole picture has no single subject |
+| `POST /remove?point=x,y` | the subject at this point (fractions): a square of 40% of the shorter side around it, grown 1.4 times while the subject touches its edge, the whole picture by the fifth run. Each run is one model run (4 to 5 s on a 4-vCPU server) |
 | `POST /remove?bg=RRGGBB` | the subject on that colour, opaque. Cleans the edges' colour first (see `refine`) unless `refine=0` |
 | `POST /remove?refine=1` | the old background's colour taken out of the soft edges, so hair and fur do not carry a halo onto a new background |
 | `POST /remove?crop=1` | the output trimmed to the subject |
-| `POST /remove?model=NAME` | run one of the models in `MODELS` instead of the default (`MODEL`). The `x-model` response header always names the model that ran. A name the service does not offer is `400` |
+| `POST /remove?model=NAME` | run one of the models in `MODELS` instead of the default (`MODEL`). A name the service does not offer is `400` |
+| `POST /remove?model=auto` | the default model, and when its result looks wrong (under 2% or over 85% of the picture kept, or more than five pieces), the other model in `MODELS` too; the answer of whichever looks right. Needs `MODELS` |
 | `POST /remove?orient=0` | the picture as stored, ignoring its orientation tag (by default a phone portrait comes back upright) |
 | any other content type | `415` |
 | body over 12 MiB, or a picture over `MAX_PIXELS` (25 megapixels) | `413` |
@@ -107,6 +112,23 @@ service definition.
 | four removals already in the service (one running, three waiting) | `503` |
 | a request running past 75 s | `408` |
 | the model fails | `500` |
+
+Every cutout comes with headers that describe it, so a caller can judge or
+explain it without decoding the image (they are exposed to browsers when
+`CORS_ORIGINS` is set):
+
+| Header | |
+|---|---|
+| `x-model` | the model whose answer this is |
+| `x-retried` | `1` when `model=auto` ran the other model too |
+| `x-model-runs` | how many times a model ran (a point can take up to five) |
+| `x-subject-coverage` | share of the picture that is subject (alpha above one half), 0 to 1 |
+| `x-subject-parts` | separate pieces of subject, each at least 0.5% of the picture |
+| `x-soft-fraction` | share of the picture that is partly see-through (alpha 0.1 to 0.9). High for hair, glass and smoke, and for a picture with no clear subject |
+| `x-bbox` | the subject's box, `x,y,w,h` as fractions; absent when there is none |
+
+A `503` because the queue is full carries `Retry-After`: the average removal
+so far times the removals ahead, in seconds.
 
 Errors are JSON, `{"error": "too_many_pixels", "message": "the picture has
 too many pixels"}`: a code for a program, a sentence for a person. The codes
@@ -214,7 +236,7 @@ of a Python package tree.
 
 | `MODEL` | Size | Licence | |
 |---|---|---|---|
-| `isnet-general-use` (default) | 178 MB | Apache-2.0 | IS-Net (2022), as rembg ships it. Quickest and lightest |
+| `isnet-general-use` (default) | 178 MB | not stated (see below) | IS-Net (2022), as rembg ships it. Quickest and lightest |
 | `birefnet-lite-768` | 187 MB | MIT | BiRefNet_lite at 768 by 768, exported by this project ([`models-1`](https://github.com/daniel-oh/background-remover/releases/tag/models-1), `scripts/export-birefnet.py`). The best cutout that fits a small server |
 | `birefnet-general-lite` | 214 MB | MIT | The same model at 1024, the author's export |
 | `birefnet-general` | 928 MB | MIT | BiRefNet with the large backbone, the author's export. The best cutout here |
@@ -234,6 +256,29 @@ Measured on an M1 Pro, two threads, a 1920 by 2397 portrait:
 | `birefnet-lite-768` | 3.5 s | 1.2 GB in the container, 1.4 GB as the command |
 | `birefnet-general-lite` | 11 s | 3.2 GB |
 | `birefnet-general` | 24 s | 3.8 GB |
+
+Where they fail, from the comparison above and from the scenes in #33:
+
+- **Glass, smoke and other see-through things** come out opaque in every
+  model here. `x-soft-fraction` is a hint that a picture has some.
+- **Scenes with several things in them** (an illustrated meadow with a
+  tortoise, a hare and an owl) have no single subject. BiRefNet then keeps
+  one small part or most of the scene; IS-Net sometimes finds two of the
+  animals. Cropped to one animal (`box` or `point`), BiRefNet cuts it out
+  cleanly every time. A box holding two animals gives one of them.
+- **A picture with no clear subject** gives a mask of noise stretched to the
+  full range, because the mask is rescaled to its own minimum and maximum
+  (as rembg does). Look for a high `x-soft-fraction` with low coverage.
+
+**Licences.** The BiRefNet weights are MIT, as their author publishes them.
+The IS-Net code is Apache-2.0, but its weights carry no licence of their
+own, and they were trained on DIS5K, whose terms allow "non-commercial use
+in research or educational purpose" and say commercial use is "prohibited
+even after copying, editing, processing or any operations of this
+database" without the authors' permission. Whether those terms reach a
+model trained on the data is a legal question this project cannot answer;
+BiRefNet's training data includes DIS5K as well. If you use either
+commercially, decide with that in view.
 
 The BiRefNet models take ImageNet-scaled input and give logits, so the
 program scales and reads them differently (`src/profile.rs`); what comes out
